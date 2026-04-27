@@ -1,0 +1,771 @@
+"""
+XSAgent — AI 辅助小说创作系统（可视化界面）
+基于 Streamlit 的交互式创作工作台
+
+启动方式:
+  streamlit run app.py
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import json
+import streamlit as st
+from datetime import datetime
+
+from xsagent.core.models import (
+    NovelProject, Character, WorldBuilding, OutlineNode,
+    StyleGuide, CharacterRole, ChapterStatus, Foreshadowing,
+    ForeshadowingStatus, StyleReference
+)
+from xsagent.storage.json_storage import JSONStorage
+from xsagent.skills.skill_registry import SkillRegistry
+from xsagent.generator.base import GeneratorFactory
+from xsagent.workflow.pipeline import CreationPipeline
+from xsagent.utils.config_loader import load_config
+from xsagent.utils.helpers import count_chinese_words
+
+# ========== 页面配置 ==========
+st.set_page_config(
+    page_title="XSAgent 小说创作系统",
+    page_icon="📝",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ========== 初始化全局组件 ==========
+@st.cache_resource
+def get_pipeline():
+    config = load_config()
+    model_cfg = config.get("model", {})
+    storage_cfg = config.get("storage", {})
+    skills_cfg = config.get("skills", {})
+
+    storage_backend = storage_cfg.get("backend", "json")
+    if storage_backend == "mysql":
+        from xsagent.storage.mysql_storage import MySQLStorage
+        storage = MySQLStorage(config=storage_cfg.get("mysql", {}))
+    else:
+        storage = JSONStorage(base_dir=storage_cfg.get("base_dir", "projects"))
+    skill_registry = SkillRegistry()
+    if skills_cfg.get("load_builtin", True):
+        skill_registry.load_builtin_skills()
+    for d in skills_cfg.get("custom_dirs", []):
+        skill_registry.load_from_directory(d)
+
+    generator = None
+    backend = model_cfg.get("backend")
+    if backend:
+        try:
+            generator = GeneratorFactory.create(backend, model_cfg)
+        except Exception as e:
+            st.sidebar.error(f"模型初始化失败: {e}")
+
+    return CreationPipeline(
+        storage=storage,
+        skill_registry=skill_registry,
+        generator=generator,
+    )
+
+pipeline = get_pipeline()
+storage = pipeline.storage
+
+# ========== Session State ==========
+if "current_project_id" not in st.session_state:
+    st.session_state.current_project_id = None
+if "generation_text" not in st.session_state:
+    st.session_state.generation_text = ""
+if "wizard_step" not in st.session_state:
+    st.session_state.wizard_step = 0
+if "wizard_data" not in st.session_state:
+    st.session_state.wizard_data = {}
+
+
+def load_project(project_id: str) -> NovelProject:
+    return storage.load(project_id)
+
+
+def save_project(project: NovelProject):
+    storage.save(project)
+
+
+def reset_wizard():
+    st.session_state.wizard_step = 0
+    st.session_state.wizard_data = {}
+
+
+# ========== 侧边栏 ==========
+st.sidebar.title("📝 XSAgent")
+st.sidebar.markdown("AI 辅助小说创作系统")
+st.sidebar.divider()
+
+# 项目选择
+projects = storage.list_projects()
+project_options = {pid: (storage.load(pid).title if storage.load(pid) else pid) for pid in projects}
+
+# 如果在向导中，侧边栏只显示向导信息；否则显示项目选择
+if st.session_state.wizard_step > 0:
+    st.sidebar.info("正在创建新小说...")
+    st.sidebar.write(f"步骤 {st.session_state.wizard_step} / 3")
+    if st.sidebar.button("取消创建"):
+        reset_wizard()
+        st.rerun()
+else:
+    selected_project_name = st.sidebar.selectbox(
+        "选择项目",
+        options=["-- 新建项目 --"] + list(project_options.keys()),
+        format_func=lambda x: "新建项目" if x == "-- 新建项目 --" else f"{project_options.get(x, x)} ({x[:6]}...)",
+        index=(list(project_options.keys()).index(st.session_state.current_project_id) + 1)
+        if st.session_state.current_project_id in project_options else 0,
+    )
+
+    if selected_project_name == "-- 新建项目 --":
+        st.sidebar.subheader("新建项目")
+        if st.sidebar.button("开始创建新小说", type="primary"):
+            st.session_state.wizard_step = 1
+            st.rerun()
+    else:
+        st.session_state.current_project_id = selected_project_name
+
+st.sidebar.divider()
+
+# 导航菜单（仅在非向导模式下显示）
+page = None
+if st.session_state.wizard_step == 0 and st.session_state.current_project_id:
+    page = st.sidebar.radio(
+        "导航",
+        ["项目概览", "世界观设定", "人物设定", "故事大纲", "伏笔设计", "风格设定", "章节创作", "导出小说"],
+    )
+
+# ========== 主内容区 ==========
+
+# ---------- 欢迎页 ----------
+if st.session_state.wizard_step == 0 and not st.session_state.current_project_id:
+    st.title("📝 欢迎来到 XSAgent")
+    st.markdown("AI 辅助小说创作系统 — 你的故事，由你主宰")
+    st.divider()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("📚 继续创作")
+        if project_options:
+            selected = st.selectbox(
+                "选择已有小说",
+                options=list(project_options.keys()),
+                format_func=lambda x: project_options.get(x, x),
+            )
+            if st.button("进入项目", use_container_width=True):
+                st.session_state.current_project_id = selected
+                st.rerun()
+        else:
+            st.info("暂无已有小说")
+
+    with col2:
+        st.subheader("✨ 新建小说")
+        st.write("遵循三步流程创建全新小说：")
+        st.write("1. 输入小说名称与基本信息")
+        st.write("2. 设计故事大纲")
+        st.write("3. 编写第一章情节流程")
+        if st.button("开始创建", type="primary", use_container_width=True):
+            st.session_state.wizard_step = 1
+            st.rerun()
+
+    st.stop()
+
+
+# ---------- 三步向导 ----------
+if st.session_state.wizard_step > 0:
+    step = st.session_state.wizard_step
+    st.title("✨ 创建新小说")
+    progress_text = "填写基本信息" if step == 1 else ("设计故事大纲" if step == 2 else "编写第一章情节")
+    st.progress(step / 3, text=f"步骤 {step} / 3 — {progress_text}")
+
+    # ===== Step 1: 基本信息 =====
+    if step == 1:
+        st.header("第一步：小说基本信息")
+        with st.form("wizard_step1"):
+            title = st.text_input("小说名称 *", value=st.session_state.wizard_data.get("title", ""))
+            author = st.text_input("作者", value=st.session_state.wizard_data.get("author", ""))
+            genre = st.text_input("题材类型", value=st.session_state.wizard_data.get("genre", ""), placeholder="玄幻 / 科幻 / 都市 / 武侠...")
+            desc = st.text_area("简介", value=st.session_state.wizard_data.get("desc", ""))
+            col_back, col_next = st.columns([1, 1])
+            with col_back:
+                if st.form_submit_button("取消", use_container_width=True):
+                    reset_wizard()
+                    st.rerun()
+            with col_next:
+                if st.form_submit_button("下一步：设计大纲", type="primary", use_container_width=True):
+                    if not title.strip():
+                        st.error("小说名称不能为空")
+                    else:
+                        st.session_state.wizard_data.update({"title": title, "author": author, "genre": genre, "desc": desc})
+                        st.session_state.wizard_step = 2
+                        st.rerun()
+        st.stop()
+
+    # ===== Step 2: 故事大纲 =====
+    elif step == 2:
+        st.header("第二步：故事大纲")
+        st.info("大纲支持卷/幕/章多级结构。你可以手动输入，或粘贴 JSON 格式数据。")
+
+        tab_form, tab_json = st.tabs(["表单输入", "JSON导入"])
+
+        with tab_form:
+            with st.form("wizard_outline_form"):
+                volume_title = st.text_input("卷标题", value="第一卷")
+                volume_summary = st.text_area("卷摘要", height=80)
+                st.markdown("**章节列表**（每行一章，格式：`章节标题|摘要`）")
+                chapter_lines = st.text_area(
+                    "章节",
+                    value="第一章：开端|故事从这里开始\n第二章：发展|冲突逐渐升级",
+                    height=150,
+                )
+                col_back, col_next = st.columns([1, 1])
+                with col_back:
+                    if st.form_submit_button("上一步", use_container_width=True):
+                        st.session_state.wizard_step = 1
+                        st.rerun()
+                with col_next:
+                    if st.form_submit_button("下一步：第一章情节", type="primary", use_container_width=True):
+                        children = []
+                        for line in chapter_lines.splitlines():
+                            line = line.strip()
+                            if not line:
+                                continue
+                            parts = line.split("|", 1)
+                            ch_title = parts[0].strip()
+                            ch_summary = parts[1].strip() if len(parts) > 1 else ""
+                            children.append(OutlineNode(
+                                title=ch_title, level=3, summary=ch_summary
+                            ))
+                        outline = OutlineNode(
+                            title=volume_title, level=1, summary=volume_summary, children=children
+                        )
+                        st.session_state.wizard_data["outline"] = outline.to_dict()
+                        st.session_state.wizard_step = 3
+                        st.rerun()
+
+        with tab_json:
+            with st.form("wizard_outline_json"):
+                json_text = st.text_area("粘贴大纲 JSON", height=200)
+                col_back, col_next = st.columns([1, 1])
+                with col_back:
+                    if st.form_submit_button("上一步", use_container_width=True):
+                        st.session_state.wizard_step = 1
+                        st.rerun()
+                with col_next:
+                    if st.form_submit_button("下一步：第一章情节", type="primary", use_container_width=True):
+                        try:
+                            data = json.loads(json_text)
+                            outline = OutlineNode.from_dict(data)
+                            st.session_state.wizard_data["outline"] = outline.to_dict()
+                            st.session_state.wizard_step = 3
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"JSON 解析失败: {e}")
+        st.stop()
+
+    # ===== Step 3: 第一章情节流程 =====
+    elif step == 3:
+        st.header("第三步：第一章情节流程")
+        st.info("明确第一章的核心要素，这些信息将作为 AI 生成内容的核心约束。")
+
+        with st.form("wizard_chapter1"):
+            ch1_summary = st.text_area("本章摘要", height=80)
+            ch1_plot_points = st.text_area("情节点（每行一个）", height=100)
+            ch1_emotion = st.text_input("情感基调", placeholder="如：紧张中带希望")
+            ch1_chars = st.text_input("出场人物（逗号分隔）", placeholder="主角名, 配角A, 反派X")
+            ch1_locations = st.text_input("场景地点（逗号分隔）")
+
+            col_back, col_create = st.columns([1, 1])
+            with col_back:
+                if st.form_submit_button("上一步", use_container_width=True):
+                    st.session_state.wizard_step = 2
+                    st.rerun()
+            with col_create:
+                if st.form_submit_button("创建小说并进入创作", type="primary", use_container_width=True):
+                    # 创建项目
+                    proj = pipeline.initialize_project(
+                        title=st.session_state.wizard_data["title"],
+                        author=st.session_state.wizard_data.get("author", ""),
+                        description=st.session_state.wizard_data.get("desc", ""),
+                    )
+                    # 设置世界观题材
+                    world = WorldBuilding(name=st.session_state.wizard_data["title"], genre=st.session_state.wizard_data.get("genre", ""))
+                    proj.world = world
+                    # 设置大纲
+                    outline = OutlineNode.from_dict(st.session_state.wizard_data["outline"])
+                    pipeline.set_outline(proj, outline)
+                    # 更新第一章信息
+                    ch1 = sorted(proj.chapters.values(), key=lambda c: c.sequence_number)[0] if proj.chapters else None
+                    if ch1:
+                        ch1.outline_summary = ch1_summary
+                        ch1.notes = f"情感基调: {ch1_emotion}\n情节点:\n{ch1_plot_points}"
+                        if ch1_chars:
+                            # 先创建人物占位（简化处理：只记录名字）
+                            for cname in [n.strip() for n in ch1_chars.split(",") if n.strip()]:
+                                exists = any(char.name == cname for char in proj.characters.values())
+                                if not exists:
+                                    char = pipeline.add_character(proj, name=cname, role=CharacterRole.SUPPORTING)
+                                    ch1.characters_present.append(char.id)
+                        if ch1_locations:
+                            ch1.locations = [loc.strip() for loc in ch1_locations.split(",") if loc.strip()]
+                        save_project(proj)
+
+                    st.session_state.current_project_id = proj.id
+                    reset_wizard()
+                    st.success("小说创建成功！")
+                    st.rerun()
+        st.stop()
+
+
+# ---------- 正常项目页面 ----------
+if not st.session_state.current_project_id:
+    st.info("请从侧边栏选择一个项目或创建新项目")
+    st.stop()
+
+project = load_project(st.session_state.current_project_id)
+if not project:
+    st.error("项目加载失败")
+    st.stop()
+
+
+# ---------- 页面：项目概览 ----------
+if page == "项目概览":
+    st.header(f"《{project.title}》")
+    cols = st.columns(4)
+    stats = pipeline.get_project_stats(project)
+    cols[0].metric("总章节", stats["total_chapters"])
+    cols[1].metric("已完成", stats["completed_chapters"])
+    cols[2].metric("总字数", f"{stats['total_words']:,}")
+    cols[3].metric("人物数", stats["character_count"])
+
+    st.divider()
+    st.subheader("章节进度")
+    if project.chapters:
+        for ch in sorted(project.chapters.values(), key=lambda c: c.sequence_number):
+            status_color = {"completed": "🟢", "review": "🟡", "writing": "🔵", "planned": "⚪"}.get(ch.status.value, "⚪")
+            cols_inner = st.columns([1, 4, 2, 2])
+            cols_inner[0].write(f"{status_color} 第{ch.sequence_number}章")
+            cols_inner[1].write(f"《{ch.title}》")
+            cols_inner[2].write(ch.status.value)
+            cols_inner[3].write(f"{ch.word_count} 字")
+    else:
+        st.info("暂无章节，请先在【故事大纲】中导入或创建大纲")
+
+
+# ---------- 页面：世界观设定 ----------
+elif page == "世界观设定":
+    st.header("世界观设定")
+    world = project.world or WorldBuilding()
+    with st.form("world_form"):
+        name = st.text_input("世界名称", value=world.name)
+        genre = st.text_input("题材类型", value=world.genre, placeholder="玄幻 / 科幻 / 都市 / 武侠...")
+        era = st.text_input("时代背景", value=world.era)
+        col1, col2 = st.columns(2)
+        with col1:
+            geography = st.text_area("地理设定", value=world.geography, height=100)
+            history = st.text_area("历史沿革", value=world.history, height=100)
+            power_system = st.text_area("力量体系 / 科技水平", value=world.power_system, height=100)
+        with col2:
+            society = st.text_area("社会结构 / 势力分布", value=world.society, height=100)
+            rules_text = st.text_area("核心规则（每行一条）", value="\n".join(world.rules), height=100)
+            locations_text = st.text_area("关键地点（格式: 地名=描述，每行一个）", value="\n".join(f"{k}={v}" for k, v in world.locations.items()), height=100)
+
+        if st.form_submit_button("保存世界观"):
+            world.name = name
+            world.genre = genre
+            world.era = era
+            world.geography = geography
+            world.history = history
+            world.power_system = power_system
+            world.society = society
+            world.rules = [r.strip() for r in rules_text.splitlines() if r.strip()]
+            world.locations = {}
+            for line in locations_text.splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    world.locations[k.strip()] = v.strip()
+            project.world = world
+            save_project(project)
+            st.success("世界观已保存")
+
+
+# ---------- 页面：人物设定 ----------
+elif page == "人物设定":
+    st.header("人物设定")
+    tab_list, tab_add = st.tabs(["人物列表", "添加人物"])
+
+    with tab_list:
+        if not project.characters:
+            st.info("暂无人物")
+        for char in project.characters.values():
+            with st.expander(f"【{char.name}】{char.role.value}"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write(f"**性格**: {char.personality or '未设定'}")
+                    st.write(f"**动机**: {char.motivation or '未设定'}")
+                    st.write(f"**背景**: {char.background or '未设定'}")
+                with c2:
+                    st.write(f"**弧线**: {char.arc or '未设定'}")
+                    if char.relationships:
+                        st.write("**关系网**:")
+                        for n, r in char.relationships.items():
+                            st.write(f"  - {n}: {r}")
+
+    with tab_add:
+        with st.form("add_character"):
+            cname = st.text_input("姓名")
+            crole = st.selectbox("角色定位", options=[r.value for r in CharacterRole])
+            cpersonality = st.text_area("性格特征")
+            cmotivation = st.text_area("核心动机")
+            cbackground = st.text_area("身世背景")
+            carc = st.text_area("人物弧线")
+            if st.form_submit_button("添加") and cname:
+                pipeline.add_character(
+                    project, name=cname, role=CharacterRole(crole),
+                    personality=cpersonality, motivation=cmotivation,
+                    background=cbackground, arc=carc,
+                )
+                st.success(f"人物 {cname} 已添加")
+                st.rerun()
+
+
+# ---------- 页面：故事大纲 ----------
+elif page == "故事大纲":
+    st.header("故事大纲")
+    st.info("当前支持从 JSON 文件导入大纲结构。格式示例见下方。")
+
+    with st.expander("查看 JSON 格式示例"):
+        st.code(json.dumps({
+            "title": "第一卷：暗流",
+            "level": 1,
+            "summary": "卷摘要",
+            "children": [
+                {
+                    "title": "第一章：开端",
+                    "level": 3,
+                    "summary": "章节摘要",
+                    "plot_points": ["情节点1", "情节点2"],
+                    "characters_involved": [],
+                    "emotional_tone": "紧张"
+                }
+            ]
+        }, ensure_ascii=False, indent=2), language="json")
+
+    uploaded = st.file_uploader("上传大纲 JSON", type=["json"])
+    if uploaded is not None:
+        data = json.load(uploaded)
+        outline = OutlineNode.from_dict(data)
+        pipeline.set_outline(project, outline)
+        st.success(f"大纲已导入，共 {len(outline.flatten_chapters())} 章")
+        st.rerun()
+
+    if project.outline:
+        st.subheader("当前大纲")
+        def render_node(node, depth=0):
+            indent = "　" * depth
+            st.write(f"{indent}**{node.title}** — {node.summary[:50]}...")
+            for child in node.children:
+                render_node(child, depth + 1)
+        render_node(project.outline)
+    else:
+        st.info("尚未导入大纲")
+
+
+# ---------- 页面：伏笔设计 ----------
+elif page == "伏笔设计":
+    st.header("伏笔设计")
+    tab_manage, tab_bind = st.tabs(["伏笔库", "绑定章节"])
+
+    with tab_manage:
+        with st.form("add_foreshadowing"):
+            st.subheader("新增伏笔")
+            fs_name = st.text_input("伏笔名称/代号")
+            fs_desc = st.text_area("伏笔描述（读者最终看到的是什么）")
+            fs_hint = st.text_area("埋设提示（可选，告诉AI如何暗示）")
+            fs_importance = st.selectbox("重要性", ["minor", "medium", "major", "critical"])
+            if st.form_submit_button("添加") and fs_name:
+                fs = pipeline.add_foreshadowing(
+                    project, name=fs_name, description=fs_desc,
+                    hint_text=fs_hint, importance=fs_importance,
+                )
+                st.success(f"伏笔 {fs.name} 已添加")
+                st.rerun()
+
+        st.divider()
+        st.subheader("伏笔列表")
+        if not project.foreshadowings:
+            st.info("暂无伏笔")
+        for fs in project.foreshadowings.values():
+            status_emoji = {"planned": "📝", "seeded": "🌱", "resolved": "✅", "abandoned": "❌"}.get(fs.status.value, "📝")
+            with st.expander(f"{status_emoji} [{fs.importance.upper()}] {fs.name} ({fs.status.value})"):
+                st.write(f"**描述**: {fs.description}")
+                if fs.hint_text:
+                    st.write(f"**埋设提示**: {fs.hint_text}")
+                st.write(f"**埋设章节**: {fs.seed_chapter_id or '未分配'}")
+                st.write(f"**回收章节**: {fs.resolve_chapter_id or '未分配'}")
+
+    with tab_bind:
+        if not project.foreshadowings:
+            st.info("请先添加伏笔")
+        elif not project.chapters:
+            st.info("请先导入大纲生成章节")
+        else:
+            st.subheader("将伏笔绑定到章节")
+            chapter_options = {ch.id: f"第{ch.sequence_number}章 《{ch.title}》" for ch in sorted(project.chapters.values(), key=lambda c: c.sequence_number)}
+            col_fs, col_ch, col_action = st.columns([2, 2, 1])
+            with col_fs:
+                fs_id = st.selectbox("选择伏笔", options=list(project.foreshadowings.keys()), format_func=lambda x: project.foreshadowings[x].name)
+            with col_ch:
+                ch_id = st.selectbox("选择章节", options=list(chapter_options.keys()), format_func=lambda x: chapter_options[x])
+            with col_action:
+                action = st.selectbox("操作", ["seed", "resolve"], format_func=lambda x: "埋设" if x == "seed" else "回收")
+                if st.button("绑定", type="primary"):
+                    pipeline.bind_foreshadowing_to_chapter(project, fs_id, ch_id, action)
+                    st.success("绑定成功")
+                    st.rerun()
+
+            st.divider()
+            st.subheader("各章节伏笔一览")
+            for ch in sorted(project.chapters.values(), key=lambda c: c.sequence_number):
+                seeded = [project.foreshadowings.get(fid) for fid in ch.foreshadowing_seeded]
+                resolved = [project.foreshadowings.get(fid) for fid in ch.foreshadowing_resolved]
+                if seeded or resolved:
+                    with st.expander(f"第{ch.sequence_number}章 《{ch.title}》"):
+                        if seeded:
+                            st.write("🌱 埋设:")
+                            for fs in seeded:
+                                if fs:
+                                    st.write(f"  - {fs.name}")
+                        if resolved:
+                            st.write("✅ 回收:")
+                            for fs in resolved:
+                                if fs:
+                                    st.write(f"  - {fs.name}")
+
+
+# ---------- 页面：风格设定 ----------
+elif page == "风格设定":
+    st.header("风格设定")
+    tab_basic, tab_mimicry = st.tabs(["基础风格", "文笔模仿"])
+
+    with tab_basic:
+        style = project.style
+        with st.form("style_form"):
+            perspective = st.selectbox("叙事视角", ["first_person", "third_person_limited", "third_person_omniscient"], index=["first_person", "third_person_limited", "third_person_omniscient"].index(style.narrative_perspective) if style.narrative_perspective in ["first_person", "third_person_limited", "third_person_omniscient"] else 1)
+            tense = st.selectbox("时态", ["past", "present"], index=0 if style.tense == "past" else 1)
+            tone = st.text_input("整体语调", value=style.tone)
+            vocabulary = st.text_input("词汇风格", value=style.vocabulary_level, placeholder="古雅 / 通俗 / 华丽 / 冷峻...")
+            density = st.select_slider("描写密度", options=["sparse", "balanced", "dense"], value=style.description_density or "balanced")
+            banned = st.text_area("禁用词（逗号分隔）", value=", ".join(style.banned_words))
+            sample = st.text_area("参考段落样例", value=style.sample_paragraph, height=150)
+            if st.form_submit_button("保存"):
+                style.narrative_perspective = perspective
+                style.tense = tense
+                style.tone = tone
+                style.vocabulary_level = vocabulary
+                style.description_density = density
+                style.banned_words = [w.strip() for w in banned.split(",") if w.strip()]
+                style.sample_paragraph = sample
+                project.style = style
+                save_project(project)
+                st.success("风格设定已保存")
+
+    with tab_mimicry:
+        st.subheader("文笔模仿")
+        mimicry_enabled = st.toggle("启用文笔模仿模式", value=project.style.mimicry_mode)
+        if mimicry_enabled != project.style.mimicry_mode:
+            project.style.mimicry_mode = mimicry_enabled
+            save_project(project)
+            st.rerun()
+
+        if mimicry_enabled:
+            target_author = st.text_input("目标模仿作者", value=project.style.reference_author, placeholder="如：金庸、古龙、刘慈欣...")
+            if target_author != project.style.reference_author:
+                project.style.reference_author = target_author
+                save_project(project)
+
+            st.divider()
+            st.subheader("风格参考库")
+            with st.form("add_style_ref"):
+                ref_name = st.text_input("参考名称")
+                ref_author = st.text_input("参考作者")
+                ref_desc = st.text_area("风格描述")
+                ref_samples = st.text_area("参考文本片段（可多条，空行分隔）", height=100)
+                if st.form_submit_button("添加") and ref_name:
+                    texts = [t.strip() for t in ref_samples.split("\n\n") if t.strip()]
+                    pipeline.add_style_reference(
+                        project, name=ref_name, reference_author=ref_author,
+                        description=ref_desc, sample_texts=texts, is_active=True,
+                    )
+                    st.success("风格参考已添加")
+                    st.rerun()
+
+            for ref in project.style_references.values():
+                active = st.checkbox(f"【{ref.name}】{ref.reference_author}", value=ref.is_active, key=f"ref_{ref.id}")
+                if active != ref.is_active:
+                    ref.is_active = active
+                    save_project(project)
+                    st.rerun()
+                with st.expander("详情"):
+                    st.write(f"描述: {ref.description}")
+                    if ref.sample_texts:
+                        st.text_area("参考片段", value=ref.sample_texts[0][:500], height=80, disabled=True)
+                    if ref.analyzed_traits:
+                        st.write(f"AI分析特征: {', '.join(ref.analyzed_traits)}")
+                    if pipeline.generator and ref.sample_texts:
+                        if st.button("AI分析风格", key=f"analyze_{ref.id}"):
+                            with st.spinner("分析中..."):
+                                pipeline.analyze_style_from_text(project, ref.id, ref.sample_texts[0])
+                            st.success("分析完成")
+                            st.rerun()
+
+
+# ---------- 页面：章节创作（核心） ----------
+elif page == "章节创作":
+    st.header("章节创作")
+
+    if not project.chapters:
+        st.warning("暂无章节，请先在【故事大纲】中导入大纲")
+        st.stop()
+
+    # 章节选择
+    chapter_list = sorted(project.chapters.values(), key=lambda c: c.sequence_number)
+    selected_chapter = st.selectbox(
+        "选择章节",
+        options=chapter_list,
+        format_func=lambda ch: f"第{ch.sequence_number}章 《{ch.title}》 [{ch.status.value}]",
+    )
+    ch = selected_chapter
+
+    st.divider()
+
+    # 三栏布局：情节流程 | 伏笔绑定 | 生成与预览
+    col_left, col_mid, col_right = st.columns([2, 1.5, 2.5])
+
+    with col_left:
+        st.subheader("📋 情节流程")
+        with st.form("chapter_plan"):
+            summary = st.text_area("本章摘要", value=ch.outline_summary, height=80)
+            plot_points = st.text_area("情节点（每行一个）", value="\n".join(ch.generation_history[-1].get("plot_points", []) if ch.generation_history else []), height=100)
+            emotional_tone = st.text_input("情感基调", value="")
+            if st.form_submit_button("保存"):
+                ch.outline_summary = summary
+                # plot_points 存在 generation_history 的最后一条记录里，作为备忘
+                ch.notes = f"情感基调: {emotional_tone}\n情节点:\n{plot_points}"
+                save_project(project)
+                st.success("已保存")
+
+        st.subheader("🎭 出场人物")
+        char_options = {cid: project.characters[cid].name for cid in project.characters}
+        selected_chars = st.multiselect(
+            "选择出场人物",
+            options=list(char_options.keys()),
+            default=ch.characters_present,
+            format_func=lambda x: char_options.get(x, x),
+        )
+        if st.button("更新出场人物"):
+            ch.characters_present = selected_chars
+            save_project(project)
+            st.success("已更新")
+
+    with col_mid:
+        st.subheader("🌱 伏笔绑定")
+        available_fs = {fid: fs for fid, fs in project.foreshadowings.items() if fs.status != ForeshadowingStatus.RESOLVED}
+        if available_fs:
+            to_seed = st.multiselect(
+                "本章埋设",
+                options=list(available_fs.keys()),
+                default=ch.foreshadowing_seeded,
+                format_func=lambda x: f"{available_fs[x].name} ({available_fs[x].status.value})",
+            )
+            to_resolve = st.multiselect(
+                "本章回收",
+                options=[fid for fid, fs in available_fs.items() if fs.status == ForeshadowingStatus.SEEDED],
+                default=ch.foreshadowing_resolved,
+                format_func=lambda x: available_fs[x].name,
+            )
+            if st.button("更新伏笔绑定"):
+                ch.foreshadowing_seeded = to_seed
+                ch.foreshadowing_resolved = to_resolve
+                save_project(project)
+                st.success("已更新")
+        else:
+            st.info("暂无可用伏笔，请在【伏笔设计】中添加")
+
+        st.subheader("🎨 当前风格")
+        st.write(f"视角: {project.style.narrative_perspective}")
+        st.write(f"语调: {project.style.tone or '默认'}")
+        st.write(f"词汇: {project.style.vocabulary_level or '默认'}")
+        if project.style.mimicry_mode:
+            st.write(f"✨ 模仿: {project.style.reference_author}")
+
+    with col_right:
+        st.subheader("🤖 内容生成")
+        if not pipeline.generator:
+            st.error("未配置 AI 模型，请在 config.yaml 中设置")
+        else:
+            gen_cols = st.columns([1, 1])
+            temperature = gen_cols[0].slider("温度", 0.0, 1.0, 0.7, 0.05)
+            max_tokens = gen_cols[1].number_input("最大Token", 1000, 8000, 4000, 500)
+
+            if st.button("生成章节", type="primary", use_container_width=True):
+                st.session_state.generation_text = ""
+                placeholder = st.empty()
+                st.session_state._gen_buffer = ""
+
+                def on_chunk(chunk: str):
+                    st.session_state._gen_buffer += chunk
+                    placeholder.markdown(st.session_state._gen_buffer)
+
+                with st.spinner("生成中..."):
+                    try:
+                        pipeline.generate_chapter(
+                            project, ch.id,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            stream_callback=on_chunk,
+                        )
+                        st.session_state.generation_text = st.session_state._gen_buffer
+                    except Exception as e:
+                        st.error(f"生成失败: {e}")
+
+        st.divider()
+        st.subheader("✏️ 内容编辑")
+        content_editor = st.text_area(
+            "章节正文",
+            value=ch.content or st.session_state.generation_text,
+            height=400,
+        )
+        save_cols = st.columns([1, 1])
+        if save_cols[0].button("保存正文", use_container_width=True):
+            ch.content = content_editor
+            ch.word_count = count_chinese_words(ch.content)
+            if ch.status == ChapterStatus.PLANNED:
+                ch.status = ChapterStatus.REVIEW
+            save_project(project)
+            st.success(f"已保存，{ch.word_count} 字")
+        if save_cols[1].button("审校通过", use_container_width=True):
+            pipeline.approve_chapter(project, ch.id)
+            st.success("章节已标记为完成")
+            st.rerun()
+
+
+# ---------- 页面：导出小说 ----------
+elif page == "导出小说":
+    st.header("导出小说")
+    fmt = st.radio("格式", ["txt", "md"], horizontal=True)
+    if st.button("导出全文", type="primary"):
+        path = pipeline.export_project(project, format=fmt)
+        st.success(f"已导出: {path}")
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        st.download_button(
+            label="下载文件",
+            data=content,
+            file_name=Path(path).name,
+            mime="text/plain" if fmt == "txt" else "text/markdown",
+        )

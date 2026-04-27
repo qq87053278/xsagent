@@ -1,0 +1,37 @@
+# XSAgent 全局配置
+
+# AI 模型配置
+model:
+  backend: openai          # openai / azure_openai / anthropic / local / custom
+  model: deepseek-v4-pro           # 模型名称
+  api_key: ""              # API Key（建议通过环境变量 OPENAI_API_KEY 设置）
+  base_url: "https://api.deepseek.com"             # 自定义 API 地址（如使用第三方中转）
+  temperature:          # 默认生成温度
+  max_tokens:          # 默认最大 token 数
+  timeout: 120             # 请求超时（秒）
+
+# 存储配置
+storage:
+  backend: "json"          # json / mysql
+  base_dir: "projects"     # JSON 模式下项目存储目录
+  auto_save: true          # 是否自动保存
+  mysql:                   # MySQL 配置（backend=mysql 时生效）
+    host: "localhost"
+    port: 3306
+    user: "root"
+    password: ""            # 建议通过环境变量 MYSQL_PASSWORD 设置
+    database: "xsagent"
+    export_dir: "projects"  # 同时保留 JSON 导出备份的目录
+
+# Skill 配置
+skills:
+  load_builtin: true       # 是否加载内置 Skill
+  custom_dirs: []          # 自定义 Skill 目录列表
+
+# 默认 Skill 绑定（可为每类生成任务指定默认 Skill）
+default_skills:
+  world_building: "world_building"
+  plot_generation: "plot_generation"
+  character_voice: "character_voice"
+  style_guidance: "style_guidance"
+  output_format: "output_format"
