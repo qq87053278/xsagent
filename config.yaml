@@ -4,7 +4,7 @@
 model:
   backend: openai          # openai / azure_openai / anthropic / local / custom
   model: deepseek-v4-pro           # 模型名称
-  api_key: ""              # API Key（建议通过环境变量 OPENAI_API_KEY 设置）
+  api_key: "sk-0e592009d4824e41bfc9269251307500"              # API Key（建议通过环境变量 OPENAI_API_KEY 设置）
   base_url: "https://api.deepseek.com"             # 自定义 API 地址（如使用第三方中转）
   temperature:          # 默认生成温度
   max_tokens:          # 默认最大 token 数

@@ -39,10 +39,21 @@ class PromptBuilder:
         # === 2. 世界观约束 (Skill: world_building) ===
         world_skill = self._get_skill(bindings, "world_building")
         if world_skill:
+            w = project.world
             world_ctx = {
                 "world_summary": ctx.world_summary,
-                "world_name": project.world.name if project.world else "",
-                "world_rules": "\n".join(f"- {r}" for r in (project.world.rules if project.world else [])),
+                "world_name": w.name if w else "",
+                "world_genre": w.genre if w else "",
+                "world_era": w.era if w else "",
+                "world_geography": w.geography if w else "",
+                "world_history": w.history if w else "",
+                "world_power_system": w.power_system if w else "",
+                "world_society": w.society if w else "",
+                "world_rules": "\n".join(f"- {r}" for r in (w.rules if w else [])),
+                "world_locations": "\n".join(f"- {k}: {v}" for k, v in (w.locations.items() if w else {})),
+                "world_factions": "\n".join(f"- {k}: {v}" for k, v in (w.factions.items() if w else {})),
+                "world_customs": "\n".join(f"- {c}" for c in (w.customs if w else [])),
+                "world_notes": w.notes if w else "",
             }
             sections.append(world_skill.render(world_ctx))
         else:

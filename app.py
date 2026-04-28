@@ -108,7 +108,7 @@ project_options = {pid: (storage.load(pid).title if storage.load(pid) else pid) 
 # 如果在向导中，侧边栏只显示向导信息；否则显示项目选择
 if st.session_state.wizard_step > 0:
     st.sidebar.info("正在创建新小说...")
-    st.sidebar.write(f"步骤 {st.session_state.wizard_step} / 3")
+    st.sidebar.write(f"步骤 {st.session_state.wizard_step} / 4")
     if st.sidebar.button("取消创建"):
         reset_wizard()
         st.rerun()
@@ -164,10 +164,11 @@ if st.session_state.wizard_step == 0 and not st.session_state.current_project_id
 
     with col2:
         st.subheader("✨ 新建小说")
-        st.write("遵循三步流程创建全新小说：")
+        st.write("遵循四步流程创建全新小说：")
         st.write("1. 输入小说名称与基本信息")
-        st.write("2. 设计故事大纲")
-        st.write("3. 编写第一章情节流程")
+        st.write("2. 设定世界观")
+        st.write("3. 设计故事大纲")
+        st.write("4. 编写第一章情节流程")
         if st.button("开始创建", type="primary", use_container_width=True):
             st.session_state.wizard_step = 1
             st.rerun()
@@ -179,8 +180,12 @@ if st.session_state.wizard_step == 0 and not st.session_state.current_project_id
 if st.session_state.wizard_step > 0:
     step = st.session_state.wizard_step
     st.title("✨ 创建新小说")
-    progress_text = "填写基本信息" if step == 1 else ("设计故事大纲" if step == 2 else "编写第一章情节")
-    st.progress(step / 3, text=f"步骤 {step} / 3 — {progress_text}")
+    progress_text = (
+        "填写基本信息" if step == 1 else
+        ("设定世界观" if step == 2 else
+        ("设计故事大纲" if step == 3 else "编写第一章情节"))
+    )
+    st.progress(step / 4, text=f"步骤 {step} / 4 — {progress_text}")
 
     # ===== Step 1: 基本信息 =====
     if step == 1:
@@ -196,7 +201,7 @@ if st.session_state.wizard_step > 0:
                     reset_wizard()
                     st.rerun()
             with col_next:
-                if st.form_submit_button("下一步：设计大纲", type="primary", use_container_width=True):
+                if st.form_submit_button("下一步：设定世界观", type="primary", use_container_width=True):
                     if not title.strip():
                         st.error("小说名称不能为空")
                     else:
@@ -205,46 +210,94 @@ if st.session_state.wizard_step > 0:
                         st.rerun()
         st.stop()
 
-    # ===== Step 2: 故事大纲 =====
+    # ===== Step 2: 世界观设定 =====
     elif step == 2:
-        st.header("第二步：故事大纲")
-        st.info("大纲支持卷/幕/章多级结构。你可以手动输入，或粘贴 JSON 格式数据。")
+        st.header("第二步：世界观设定")
+        st.info("详细的世界观设定将作为 AI 生成内容的核心约束。所有字段均可后续修改。")
+
+        with st.form("wizard_world_form"):
+            w_name = st.text_input("世界名称", value=st.session_state.wizard_data.get("title", ""))
+            w_genre = st.text_input("题材类型", value=st.session_state.wizard_data.get("genre", ""), placeholder="玄幻 / 科幻 / 都市 / 武侠...")
+            w_era = st.text_input("时代背景", value=st.session_state.wizard_data.get("world_era", ""), placeholder="如：架空古代 / 2145年未来地球")
+            col_w1, col_w2 = st.columns(2)
+            with col_w1:
+                w_geography = st.text_area("地理设定", value=st.session_state.wizard_data.get("world_geography", ""), height=100, placeholder="大陆分布、气候、地形等")
+                w_history = st.text_area("历史沿革", value=st.session_state.wizard_data.get("world_history", ""), height=100, placeholder="重大历史事件、朝代更替等")
+                w_power = st.text_area("力量体系 / 科技水平", value=st.session_state.wizard_data.get("world_power_system", ""), height=100, placeholder="修炼境界、魔法体系、科技程度等")
+            with col_w2:
+                w_society = st.text_area("社会结构 / 势力分布", value=st.session_state.wizard_data.get("world_society", ""), height=100, placeholder="阶级、政体、门派、公司等")
+                w_rules = st.text_area("核心规则（每行一条）", value="\n".join(st.session_state.wizard_data.get("world_rules", [])), height=100, placeholder="如：魔法师每日施法上限为3次")
+                w_customs = st.text_area("风俗文化（每行一条）", value="\n".join(st.session_state.wizard_data.get("world_customs", [])), height=100, placeholder="如：新年要放天灯祈福")
+
+            w_locations = st.text_area("关键地点（格式: 地名=描述，每行一个）", value="\n".join(f"{k}={v}" for k, v in st.session_state.wizard_data.get("world_locations", {}).items()), height=80)
+            w_factions = st.text_area("势力/组织（格式: 名称=描述，每行一个）", value="\n".join(f"{k}={v}" for k, v in st.session_state.wizard_data.get("world_factions", {}).items()), height=80)
+            w_notes = st.text_area("世界观备忘笔记", value=st.session_state.wizard_data.get("world_notes", ""), height=60)
+            w_tags = st.text_input("标签（逗号分隔）", value=", ".join(st.session_state.wizard_data.get("world_tags", [])), placeholder="修仙, 架空, 权谋...")
+
+            col_back, col_next = st.columns([1, 1])
+            with col_back:
+                if st.form_submit_button("上一步", use_container_width=True):
+                    st.session_state.wizard_step = 1
+                    st.rerun()
+            with col_next:
+                if st.form_submit_button("下一步：设计大纲", type="primary", use_container_width=True):
+                    st.session_state.wizard_data.update({
+                        "world_name": w_name,
+                        "genre": w_genre,
+                        "world_era": w_era,
+                        "world_geography": w_geography,
+                        "world_history": w_history,
+                        "world_power_system": w_power,
+                        "world_society": w_society,
+                        "world_rules": [r.strip() for r in w_rules.splitlines() if r.strip()],
+                        "world_customs": [c.strip() for c in w_customs.splitlines() if c.strip()],
+                        "world_locations": {k.strip(): v.strip() for line in w_locations.splitlines() if "=" in line for k, v in [line.split("=", 1)]},
+                        "world_factions": {k.strip(): v.strip() for line in w_factions.splitlines() if "=" in line for k, v in [line.split("=", 1)]},
+                        "world_notes": w_notes,
+                        "world_tags": [t.strip() for t in w_tags.split(",") if t.strip()],
+                    })
+                    st.session_state.wizard_step = 3
+                    st.rerun()
+        st.stop()
+
+    # ===== Step 3: 故事大纲 =====
+    elif step == 3:
+        st.header("第三步：故事大纲")
+        st.info("大纲只需规划到「卷」级别，描述每卷的大体流程即可。具体章节可在后续创作中逐步添加。高级用户也可通过 JSON 导入含章的详细大纲。")
 
         tab_form, tab_json = st.tabs(["表单输入", "JSON导入"])
 
         with tab_form:
             with st.form("wizard_outline_form"):
-                volume_title = st.text_input("卷标题", value="第一卷")
-                volume_summary = st.text_area("卷摘要", height=80)
-                st.markdown("**章节列表**（每行一章，格式：`章节标题|摘要`）")
-                chapter_lines = st.text_area(
-                    "章节",
-                    value="第一章：开端|故事从这里开始\n第二章：发展|冲突逐渐升级",
+                st.markdown("**卷列表**（每行一卷，格式：`卷标题|摘要`）")
+                volume_lines = st.text_area(
+                    "卷",
+                    value="第一卷：暗流|故事从这里开始\n第二卷：风云|冲突逐渐升级",
                     height=150,
                 )
                 col_back, col_next = st.columns([1, 1])
                 with col_back:
                     if st.form_submit_button("上一步", use_container_width=True):
-                        st.session_state.wizard_step = 1
+                        st.session_state.wizard_step = 2
                         st.rerun()
                 with col_next:
                     if st.form_submit_button("下一步：第一章情节", type="primary", use_container_width=True):
                         children = []
-                        for line in chapter_lines.splitlines():
+                        for line in volume_lines.splitlines():
                             line = line.strip()
                             if not line:
                                 continue
                             parts = line.split("|", 1)
-                            ch_title = parts[0].strip()
-                            ch_summary = parts[1].strip() if len(parts) > 1 else ""
+                            vol_title = parts[0].strip()
+                            vol_summary = parts[1].strip() if len(parts) > 1 else ""
                             children.append(OutlineNode(
-                                title=ch_title, level=3, summary=ch_summary
+                                title=vol_title, level=1, summary=vol_summary
                             ))
                         outline = OutlineNode(
-                            title=volume_title, level=1, summary=volume_summary, children=children
+                            title="全书大纲", level=1, summary="", children=children
                         )
                         st.session_state.wizard_data["outline"] = outline.to_dict()
-                        st.session_state.wizard_step = 3
+                        st.session_state.wizard_step = 4
                         st.rerun()
 
         with tab_json:
@@ -253,7 +306,7 @@ if st.session_state.wizard_step > 0:
                 col_back, col_next = st.columns([1, 1])
                 with col_back:
                     if st.form_submit_button("上一步", use_container_width=True):
-                        st.session_state.wizard_step = 1
+                        st.session_state.wizard_step = 2
                         st.rerun()
                 with col_next:
                     if st.form_submit_button("下一步：第一章情节", type="primary", use_container_width=True):
@@ -261,18 +314,19 @@ if st.session_state.wizard_step > 0:
                             data = json.loads(json_text)
                             outline = OutlineNode.from_dict(data)
                             st.session_state.wizard_data["outline"] = outline.to_dict()
-                            st.session_state.wizard_step = 3
+                            st.session_state.wizard_step = 4
                             st.rerun()
                         except Exception as e:
                             st.error(f"JSON 解析失败: {e}")
         st.stop()
 
-    # ===== Step 3: 第一章情节流程 =====
-    elif step == 3:
-        st.header("第三步：第一章情节流程")
-        st.info("明确第一章的核心要素，这些信息将作为 AI 生成内容的核心约束。")
+    # ===== Step 4: 第一章情节流程 =====
+    elif step == 4:
+        st.header("第四步：第一章情节流程")
+        st.info("明确第一章的核心要素，这些信息将作为 AI 生成内容的核心约束。若大纲未包含章节，系统将自动为你创建第一章。")
 
         with st.form("wizard_chapter1"):
+            ch1_title = st.text_input("章节标题", value="第一章")
             ch1_summary = st.text_area("本章摘要", height=80)
             ch1_plot_points = st.text_area("情节点（每行一个）", height=100)
             ch1_emotion = st.text_input("情感基调", placeholder="如：紧张中带希望")
@@ -282,7 +336,7 @@ if st.session_state.wizard_step > 0:
             col_back, col_create = st.columns([1, 1])
             with col_back:
                 if st.form_submit_button("上一步", use_container_width=True):
-                    st.session_state.wizard_step = 2
+                    st.session_state.wizard_step = 3
                     st.rerun()
             with col_create:
                 if st.form_submit_button("创建小说并进入创作", type="primary", use_container_width=True):
@@ -292,27 +346,45 @@ if st.session_state.wizard_step > 0:
                         author=st.session_state.wizard_data.get("author", ""),
                         description=st.session_state.wizard_data.get("desc", ""),
                     )
-                    # 设置世界观题材
-                    world = WorldBuilding(name=st.session_state.wizard_data["title"], genre=st.session_state.wizard_data.get("genre", ""))
+                    # 设置完整世界观
+                    world_data = st.session_state.wizard_data
+                    world = WorldBuilding(
+                        name=world_data.get("world_name", world_data["title"]),
+                        genre=world_data.get("genre", ""),
+                        era=world_data.get("world_era", ""),
+                        geography=world_data.get("world_geography", ""),
+                        history=world_data.get("world_history", ""),
+                        power_system=world_data.get("world_power_system", ""),
+                        society=world_data.get("world_society", ""),
+                        rules=world_data.get("world_rules", []),
+                        locations=world_data.get("world_locations", {}),
+                        factions=world_data.get("world_factions", {}),
+                        customs=world_data.get("world_customs", []),
+                        notes=world_data.get("world_notes", ""),
+                        tags=world_data.get("world_tags", []),
+                    )
                     proj.world = world
                     # 设置大纲
                     outline = OutlineNode.from_dict(st.session_state.wizard_data["outline"])
                     pipeline.set_outline(proj, outline)
+                    # 获取或创建第一章
+                    if proj.chapters:
+                        ch1 = sorted(proj.chapters.values(), key=lambda c: c.sequence_number)[0]
+                    else:
+                        ch1 = pipeline.add_chapter(proj, title=ch1_title, outline_summary=ch1_summary)
                     # 更新第一章信息
-                    ch1 = sorted(proj.chapters.values(), key=lambda c: c.sequence_number)[0] if proj.chapters else None
-                    if ch1:
-                        ch1.outline_summary = ch1_summary
-                        ch1.notes = f"情感基调: {ch1_emotion}\n情节点:\n{ch1_plot_points}"
-                        if ch1_chars:
-                            # 先创建人物占位（简化处理：只记录名字）
-                            for cname in [n.strip() for n in ch1_chars.split(",") if n.strip()]:
-                                exists = any(char.name == cname for char in proj.characters.values())
-                                if not exists:
-                                    char = pipeline.add_character(proj, name=cname, role=CharacterRole.SUPPORTING)
-                                    ch1.characters_present.append(char.id)
-                        if ch1_locations:
-                            ch1.locations = [loc.strip() for loc in ch1_locations.split(",") if loc.strip()]
-                        save_project(proj)
+                    ch1.outline_summary = ch1_summary
+                    ch1.notes = f"情感基调: {ch1_emotion}\n情节点:\n{ch1_plot_points}"
+                    if ch1_chars:
+                        # 先创建人物占位（简化处理：只记录名字）
+                        for cname in [n.strip() for n in ch1_chars.split(",") if n.strip()]:
+                            exists = any(char.name == cname for char in proj.characters.values())
+                            if not exists:
+                                char = pipeline.add_character(proj, name=cname, role=CharacterRole.SUPPORTING)
+                                ch1.characters_present.append(char.id)
+                    if ch1_locations:
+                        ch1.locations = [loc.strip() for loc in ch1_locations.split(",") if loc.strip()]
+                    save_project(proj)
 
                     st.session_state.current_project_id = proj.id
                     reset_wizard()
@@ -374,6 +446,11 @@ elif page == "世界观设定":
             rules_text = st.text_area("核心规则（每行一条）", value="\n".join(world.rules), height=100)
             locations_text = st.text_area("关键地点（格式: 地名=描述，每行一个）", value="\n".join(f"{k}={v}" for k, v in world.locations.items()), height=100)
 
+        factions_text = st.text_area("势力/组织（格式: 名称=描述，每行一个）", value="\n".join(f"{k}={v}" for k, v in world.factions.items()), height=80)
+        customs_text = st.text_area("风俗文化（每行一条）", value="\n".join(world.customs), height=80)
+        notes = st.text_area("世界观备忘笔记", value=world.notes, height=60)
+        tags_text = st.text_input("标签（逗号分隔）", value=", ".join(world.tags), placeholder="修仙, 架空, 权谋...")
+
         if st.form_submit_button("保存世界观"):
             world.name = name
             world.genre = genre
@@ -388,6 +465,14 @@ elif page == "世界观设定":
                 if "=" in line:
                     k, v = line.split("=", 1)
                     world.locations[k.strip()] = v.strip()
+            world.factions = {}
+            for line in factions_text.splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    world.factions[k.strip()] = v.strip()
+            world.customs = [c.strip() for c in customs_text.splitlines() if c.strip()]
+            world.notes = notes
+            world.tags = [t.strip() for t in tags_text.split(",") if t.strip()]
             project.world = world
             save_project(project)
             st.success("世界观已保存")
@@ -436,43 +521,126 @@ elif page == "人物设定":
 # ---------- 页面：故事大纲 ----------
 elif page == "故事大纲":
     st.header("故事大纲")
-    st.info("当前支持从 JSON 文件导入大纲结构。格式示例见下方。")
 
-    with st.expander("查看 JSON 格式示例"):
-        st.code(json.dumps({
-            "title": "第一卷：暗流",
-            "level": 1,
-            "summary": "卷摘要",
-            "children": [
-                {
-                    "title": "第一章：开端",
-                    "level": 3,
-                    "summary": "章节摘要",
-                    "plot_points": ["情节点1", "情节点2"],
-                    "characters_involved": [],
-                    "emotional_tone": "紧张"
-                }
-            ]
-        }, ensure_ascii=False, indent=2), language="json")
+    tab_view_edit, tab_import = st.tabs(["查看与编辑", "导入/覆盖"])
 
-    uploaded = st.file_uploader("上传大纲 JSON", type=["json"])
-    if uploaded is not None:
-        data = json.load(uploaded)
-        outline = OutlineNode.from_dict(data)
-        pipeline.set_outline(project, outline)
-        st.success(f"大纲已导入，共 {len(outline.flatten_chapters())} 章")
-        st.rerun()
+    # ===== 辅助函数：扁平化大纲节点 =====
+    def flatten_outline(node, depth=0):
+        result = [(node.id, "　" * depth + f"【{node.title}】", node)]
+        for child in node.children:
+            result.extend(flatten_outline(child, depth + 1))
+        return result
 
-    if project.outline:
-        st.subheader("当前大纲")
-        def render_node(node, depth=0):
-            indent = "　" * depth
-            st.write(f"{indent}**{node.title}** — {node.summary[:50]}...")
-            for child in node.children:
-                render_node(child, depth + 1)
-        render_node(project.outline)
-    else:
-        st.info("尚未导入大纲")
+    # ===== Tab 1: 查看与编辑 =====
+    with tab_view_edit:
+        if project.outline:
+            st.subheader("当前大纲")
+            def render_node(node, depth=0):
+                indent = "　" * depth
+                st.write(f"{indent}**{node.title}** — {node.summary[:50]}...")
+                for child in node.children:
+                    render_node(child, depth + 1)
+            render_node(project.outline)
+
+            st.divider()
+            st.subheader("大纲编辑")
+            flat_nodes = flatten_outline(project.outline)
+            node_options = {nid: label for nid, label, _ in flat_nodes}
+            selected_node_id = st.selectbox(
+                "选择要操作的节点",
+                options=list(node_options.keys()),
+                format_func=lambda x: node_options[x],
+                key="outline_edit_select",
+            )
+            selected_node = next(n for nid, _, n in flat_nodes if nid == selected_node_id)
+
+            # 修改节点
+            with st.form("edit_node_form"):
+                edit_title = st.text_input("标题", value=selected_node.title, key="edit_title")
+                edit_summary = st.text_area("摘要", value=selected_node.summary, height=80, key="edit_summary")
+                if st.form_submit_button("保存修改"):
+                    pipeline.update_outline_node(project, selected_node_id, title=edit_title, summary=edit_summary)
+                    st.success("节点已更新")
+                    st.rerun()
+
+            # 添加子节点
+            with st.form("add_child_form"):
+                child_title = st.text_input("子节点标题", key="child_title")
+                child_summary = st.text_area("子节点摘要", height=60, key="child_summary")
+                child_level = st.selectbox(
+                    "层级",
+                    [1, 2, 3],
+                    format_func=lambda x: {1: "1-卷", 2: "2-幕", 3: "3-章"}[x],
+                    key="child_level",
+                )
+                if st.form_submit_button("添加子节点") and child_title.strip():
+                    pipeline.add_outline_node(
+                        project, parent_id=selected_node_id,
+                        title=child_title.strip(), summary=child_summary, level=child_level,
+                    )
+                    st.success("子节点已添加")
+                    st.rerun()
+
+            # 删除节点
+            if selected_node_id != project.outline.id:
+                if st.button("删除选中节点", type="secondary"):
+                    pipeline.remove_outline_node(project, selected_node_id)
+                    st.success("节点已删除")
+                    st.rerun()
+            else:
+                st.caption("根节点不可删除，如需清空大纲请使用「导入/覆盖」功能。")
+        else:
+            st.info("尚未导入大纲，可在「导入/覆盖」标签页导入，或在大纲创建后在此编辑。")
+
+        st.divider()
+        st.subheader("章节管理")
+        with st.form("add_chapter_form"):
+            col_title, col_seq = st.columns([3, 1])
+            with col_title:
+                new_ch_title = st.text_input("章节标题", placeholder="如：第三章")
+            with col_seq:
+                next_seq = max((c.sequence_number for c in project.chapters.values()), default=0) + 1
+                new_ch_seq = st.number_input("序号", min_value=1, value=next_seq, step=1)
+            new_ch_summary = st.text_area("章节摘要", height=60)
+            if st.form_submit_button("添加章节") and new_ch_title.strip():
+                pipeline.add_chapter(project, title=new_ch_title.strip(), outline_summary=new_ch_summary, sequence_number=int(new_ch_seq))
+                st.success(f"章节 {new_ch_title} 已添加")
+                st.rerun()
+
+        if project.chapters:
+            st.write("已有章节:")
+            for ch in sorted(project.chapters.values(), key=lambda c: c.sequence_number):
+                st.write(f"- 第{ch.sequence_number}章 《{ch.title}》 — {ch.outline_summary[:40]}...")
+        else:
+            st.info("暂无章节，可通过上方表单手动添加，或导入含章的详细大纲。")
+
+    # ===== Tab 2: 导入/覆盖 =====
+    with tab_import:
+        st.info("上传 JSON 文件将完全覆盖现有大纲。如需保留当前大纲，请先导出备份。")
+        with st.expander("查看 JSON 格式示例"):
+            st.code(json.dumps({
+                "title": "第一卷：暗流",
+                "level": 1,
+                "summary": "卷摘要",
+                "children": [
+                    {
+                        "title": "第一章：开端",
+                        "level": 3,
+                        "summary": "章节摘要",
+                        "plot_points": ["情节点1", "情节点2"],
+                        "characters_involved": [],
+                        "emotional_tone": "紧张"
+                    }
+                ]
+            }, ensure_ascii=False, indent=2), language="json")
+
+        uploaded = st.file_uploader("上传大纲 JSON", type=["json"])
+        if uploaded is not None:
+            data = json.load(uploaded)
+            outline = OutlineNode.from_dict(data)
+            pipeline.set_outline(project, outline)
+            st.success(f"大纲已导入，共 {len(outline.flatten_chapters())} 章")
+            st.rerun()
 
 
 # ---------- 页面：伏笔设计 ----------
@@ -629,7 +797,7 @@ elif page == "章节创作":
     st.header("章节创作")
 
     if not project.chapters:
-        st.warning("暂无章节，请先在【故事大纲】中导入大纲")
+        st.warning("暂无章节，请先在【故事大纲】中添加章节或导入含章的详细大纲")
         st.stop()
 
     # 章节选择

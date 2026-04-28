@@ -43,7 +43,8 @@ class JSONStorage:
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, **kwargs)
 
-        # 同时保存一个独立的人物设定文件便于人工查阅
+        # 同时保存独立的设定文件便于人工查阅
+        self._save_world_building_sheet(project)
         self._save_characters_sheet(project)
         self._save_outline_sheet(project)
 
@@ -145,6 +146,52 @@ class JSONStorage:
             f.write("\n".join(lines))
 
         return str(file_path)
+
+    def _save_world_building_sheet(self, project: NovelProject) -> None:
+        """保存世界观设定表（便于人工查阅）"""
+        if not project.world:
+            return
+        file_path = self._project_dir(project.id) / "world_building.md"
+        w = project.world
+        lines = [f"# 《{project.title}》世界观设定\n\n"]
+        lines.append(f"## 基本信息")
+        lines.append(f"- 世界名称: {w.name}")
+        lines.append(f"- 题材: {w.genre}")
+        lines.append(f"- 时代背景: {w.era}\n")
+        if w.geography:
+            lines.append(f"## 地理设定\n{w.geography}\n")
+        if w.history:
+            lines.append(f"## 历史沿革\n{w.history}\n")
+        if w.power_system:
+            lines.append(f"## 力量体系 / 科技水平\n{w.power_system}\n")
+        if w.society:
+            lines.append(f"## 社会结构 / 势力分布\n{w.society}\n")
+        if w.rules:
+            lines.append(f"## 核心规则")
+            for r in w.rules:
+                lines.append(f"- {r}")
+            lines.append("")
+        if w.locations:
+            lines.append(f"## 关键地点")
+            for k, v in w.locations.items():
+                lines.append(f"- **{k}**: {v}")
+            lines.append("")
+        if w.factions:
+            lines.append(f"## 势力/组织")
+            for k, v in w.factions.items():
+                lines.append(f"- **{k}**: {v}")
+            lines.append("")
+        if w.customs:
+            lines.append(f"## 风俗文化")
+            for c in w.customs:
+                lines.append(f"- {c}")
+            lines.append("")
+        if w.notes:
+            lines.append(f"## 备忘笔记\n{w.notes}\n")
+        if w.tags:
+            lines.append(f"## 标签\n{', '.join(w.tags)}\n")
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
 
     def _save_characters_sheet(self, project: NovelProject) -> None:
         """保存人物设定表（便于人工查阅）"""

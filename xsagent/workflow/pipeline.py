@@ -81,6 +81,29 @@ class CreationPipeline:
         self.storage.save(project)
         return world
 
+    def add_chapter(
+        self,
+        project: NovelProject,
+        title: str,
+        outline_summary: str = "",
+        sequence_number: Optional[int] = None,
+    ) -> Chapter:
+        """为项目手动添加一个章节（不依赖大纲同步）"""
+        if sequence_number is None:
+            sequence_number = max(
+                (c.sequence_number for c in project.chapters.values()), default=0
+            ) + 1
+        ch = Chapter(
+            title=title,
+            sequence_number=sequence_number,
+            outline_summary=outline_summary,
+            status=ChapterStatus.PLANNED,
+        )
+        project.chapters[ch.id] = ch
+        project.updated_at = datetime.now().isoformat()
+        self.storage.save(project)
+        return ch
+
     def add_foreshadowing(
         self,
         project: NovelProject,
@@ -230,6 +253,117 @@ class CreationPipeline:
                 )
                 node.chapter_id = ch.id
                 project.chapters[ch.id] = ch
+
+    # --- 大纲树操作 ---
+
+    def _find_outline_node(self, root: OutlineNode, node_id: str) -> Optional[OutlineNode]:
+        """递归查找大纲节点"""
+        if root.id == node_id:
+            return root
+        for child in root.children:
+            found = self._find_outline_node(child, node_id)
+            if found:
+                return found
+        return None
+
+    def _find_outline_node_parent(self, root: OutlineNode, node_id: str) -> Optional[OutlineNode]:
+        """递归查找大纲节点的父节点"""
+        for child in root.children:
+            if child.id == node_id:
+                return root
+            found = self._find_outline_node_parent(child, node_id)
+            if found:
+                return found
+        return None
+
+    def update_outline_node(
+        self,
+        project: NovelProject,
+        node_id: str,
+        title: Optional[str] = None,
+        summary: Optional[str] = None,
+    ) -> OutlineNode:
+        """更新大纲节点信息"""
+        if not project.outline:
+            raise ValueError("项目尚无大纲")
+        node = self._find_outline_node(project.outline, node_id)
+        if not node:
+            raise ValueError(f"节点不存在: {node_id}")
+        if title is not None:
+            node.title = title
+        if summary is not None:
+            node.summary = summary
+        # 若该节点关联了章节，同步更新章节标题与摘要
+        if node.chapter_id and node.chapter_id in project.chapters:
+            ch = project.chapters[node.chapter_id]
+            ch.title = node.title
+            ch.outline_summary = node.summary
+        project.updated_at = datetime.now().isoformat()
+        self.storage.save(project)
+        return node
+
+    def add_outline_node(
+        self,
+        project: NovelProject,
+        parent_id: Optional[str],
+        title: str,
+        summary: str = "",
+        level: int = 1,
+    ) -> OutlineNode:
+        """在大纲中新增节点。parent_id 为 None 时添加到根节点下"""
+        if not project.outline:
+            raise ValueError("项目尚无大纲")
+        node = OutlineNode(title=title, level=level, summary=summary)
+        if parent_id is None or parent_id == project.outline.id:
+            project.outline.children.append(node)
+        else:
+            parent = self._find_outline_node(project.outline, parent_id)
+            if not parent:
+                raise ValueError(f"父节点不存在: {parent_id}")
+            parent.children.append(node)
+        # 若新增的是章级节点，自动同步创建章节占位
+        if level == 3:
+            self._sync_chapters_from_outline(project)
+        project.updated_at = datetime.now().isoformat()
+        self.storage.save(project)
+        return node
+
+    def remove_outline_node(
+        self,
+        project: NovelProject,
+        node_id: str,
+        remove_linked_chapter: bool = False,
+    ) -> bool:
+        """删除大纲节点。若节点关联了章节，可选择是否同时删除章节"""
+        if not project.outline:
+            return False
+        if project.outline.id == node_id:
+            # 删除根节点 = 清空整个大纲
+            project.outline = None
+            project.updated_at = datetime.now().isoformat()
+            self.storage.save(project)
+            return True
+        parent = self._find_outline_node_parent(project.outline, node_id)
+        if not parent:
+            return False
+        target = None
+        for child in parent.children:
+            if child.id == node_id:
+                target = child
+                break
+        if not target:
+            return False
+        parent.children.remove(target)
+        # 处理关联章节
+        if target.chapter_id and target.chapter_id in project.chapters:
+            if remove_linked_chapter:
+                del project.chapters[target.chapter_id]
+            else:
+                # 仅解除关联
+                project.chapters[target.chapter_id].outline_summary = ""
+        project.updated_at = datetime.now().isoformat()
+        self.storage.save(project)
+        return True
 
     def generate_chapter(
         self,
