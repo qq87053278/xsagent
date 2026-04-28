@@ -229,6 +229,7 @@ class Chapter:
     foreshadowing_seeded: List[str] = field(default_factory=list)    # 本章埋下的伏笔ID
     foreshadowing_resolved: List[str] = field(default_factory=list)  # 本章回收的伏笔ID
     generation_history: List[Dict[str, Any]] = field(default_factory=list)  # 生成记录
+    plot_memory: str = ""                   # AI分析后的剧情记忆（关键情节/人物状态/地点）
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
     notes: str = ""
@@ -273,6 +274,9 @@ class GenerationContext:
     style_references: List[Dict[str, Any]] = field(default_factory=list)  # 风格参考数据
     mimicry_mode: bool = False
     reference_author: str = ""
+    previous_chapter_content: str = ""        # 前一章结尾片段（用于衔接）
+    previous_chapter_plot_memory: str = ""    # 前一章的剧情记忆
+    previous_plot_memories: List[str] = field(default_factory=list)  # 前2-5章的剧情记忆
 
     def to_dict(self) -> Dict[str, Any]:
         data = {
@@ -282,6 +286,8 @@ class GenerationContext:
             "outline_path": self.outline_path,
             "current_node": self.current_node.to_dict() if self.current_node else None,
             "previous_chapter_summary": self.previous_chapter_summary,
+            "previous_chapter_content": self.previous_chapter_content,
+            "previous_chapter_plot_memory": self.previous_chapter_plot_memory,
             "style_directives": self.style_directives,
             "constraints": self.constraints,
             "references": self.references,
@@ -290,6 +296,7 @@ class GenerationContext:
             "style_references": self.style_references,
             "mimicry_mode": self.mimicry_mode,
             "reference_author": self.reference_author,
+            "previous_plot_memories": self.previous_plot_memories,
         }
         return data
 
@@ -407,14 +414,60 @@ class NovelProject:
                     ctx.current_node = node
                     ctx.outline_path = self._trace_outline_path(node)
                     break
+            # fallback: 若通过 chapter_id 未匹配到（如手动添加的章节），尝试多种方式匹配
+            if not ctx.current_node:
+                ch = self.chapters.get(chapter_id)
+                if ch:
+                    # 1. 精确标题匹配
+                    for node in flat:
+                        if node.title == ch.title:
+                            ctx.current_node = node
+                            ctx.outline_path = self._trace_outline_path(node)
+                            node.chapter_id = chapter_id
+                            break
+                    # 2. 如果只有一个章节节点，直接匹配
+                    if not ctx.current_node and len(flat) == 1:
+                        ctx.current_node = flat[0]
+                        ctx.outline_path = self._trace_outline_path(flat[0])
+                        flat[0].chapter_id = chapter_id
+                    # 3. 模糊标题匹配（互相包含）
+                    if not ctx.current_node:
+                        ch_title_clean = ch.title.strip()
+                        for node in flat:
+                            node_title_clean = node.title.strip()
+                            if node_title_clean in ch_title_clean or ch_title_clean in node_title_clean:
+                                ctx.current_node = node
+                                ctx.outline_path = self._trace_outline_path(node)
+                                node.chapter_id = chapter_id
+                                break
 
         # 前一章摘要
         seq = self.get_chapter_sequence()
+        current_idx = -1
         for i, ch in enumerate(seq):
-            if ch.id == chapter_id and i > 0:
-                prev = seq[i - 1]
-                ctx.previous_chapter_summary = f"第{prev.sequence_number}章《{prev.title}》: {prev.outline_summary}"
+            if ch.id == chapter_id:
+                current_idx = i
                 break
+
+        if current_idx > 0:
+            prev = seq[current_idx - 1]
+            ctx.previous_chapter_summary = f"第{prev.sequence_number}章《{prev.title}》: {prev.outline_summary}"
+            # 前一章剧情记忆 + 结尾片段，双重衔接保障
+            if prev.plot_memory:
+                ctx.previous_chapter_plot_memory = prev.plot_memory
+            if prev.content:
+                # 取最后 800 字作为衔接上下文
+                tail = prev.content[-800:] if len(prev.content) > 800 else prev.content
+                ctx.previous_chapter_content = tail
+
+        # 前2-5章的剧情记忆（前一章用完整正文，所以这取更前面的4章）
+        if current_idx > 1:
+            start_idx = max(0, current_idx - 5)
+            for prev_ch in seq[start_idx:current_idx - 1]:
+                if prev_ch.plot_memory:
+                    ctx.previous_plot_memories.append(
+                        f"第{prev_ch.sequence_number}章《{prev_ch.title}》: {prev_ch.plot_memory}"
+                    )
 
         # 风格指令
         style = self.style

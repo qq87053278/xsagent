@@ -88,6 +88,7 @@ def load_project(project_id: str) -> NovelProject:
 
 
 def save_project(project: NovelProject):
+    project.updated_at = datetime.now().isoformat()
     storage.save(project)
 
 
@@ -488,17 +489,61 @@ elif page == "人物设定":
             st.info("暂无人物")
         for char in project.characters.values():
             with st.expander(f"【{char.name}】{char.role.value}"):
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.write(f"**性格**: {char.personality or '未设定'}")
-                    st.write(f"**动机**: {char.motivation or '未设定'}")
-                    st.write(f"**背景**: {char.background or '未设定'}")
-                with c2:
-                    st.write(f"**弧线**: {char.arc or '未设定'}")
-                    if char.relationships:
-                        st.write("**关系网**:")
-                        for n, r in char.relationships.items():
-                            st.write(f"  - {n}: {r}")
+                with st.form(f"edit_char_form_{char.id}"):
+                    cname = st.text_input("姓名", value=char.name, key=f"char_name_{char.id}")
+                    calias = st.text_input("别名/称号（逗号分隔）", value=", ".join(char.alias), key=f"char_alias_{char.id}")
+                    crole = st.selectbox(
+                        "角色定位",
+                        options=[r.value for r in CharacterRole],
+                        index=[r.value for r in CharacterRole].index(char.role.value),
+                        key=f"char_role_{char.id}",
+                    )
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        cage = st.number_input("年龄", value=char.age or 0, min_value=0, key=f"char_age_{char.id}")
+                        cappearance = st.text_area("外貌描写", value=char.appearance, height=80, key=f"char_appearance_{char.id}")
+                        cpersonality = st.text_area("性格特征", value=char.personality, height=80, key=f"char_personality_{char.id}")
+                        cmotivation = st.text_area("核心动机", value=char.motivation, height=80, key=f"char_motivation_{char.id}")
+                    with col2:
+                        cgender = st.text_input("性别", value=char.gender or "", key=f"char_gender_{char.id}")
+                        cbackground = st.text_area("身世背景", value=char.background, height=80, key=f"char_background_{char.id}")
+                        carc = st.text_area("人物弧线", value=char.arc, height=80, key=f"char_arc_{char.id}")
+                        cnotes = st.text_area("备忘笔记", value=char.notes, height=80, key=f"char_notes_{char.id}")
+                    cabilities = st.text_input("能力/技能（逗号分隔）", value=", ".join(char.abilities), key=f"char_abilities_{char.id}")
+                    crels = st.text_input("关系网（格式: 角色名=关系，逗号分隔）", value=", ".join(f"{k}={v}" for k, v in char.relationships.items()), key=f"char_rels_{char.id}")
+                    ctags = st.text_input("标签（逗号分隔）", value=", ".join(char.tags), key=f"char_tags_{char.id}")
+
+                    if st.form_submit_button("保存修改"):
+                        char.name = cname
+                        char.alias = [a.strip() for a in calias.split(",") if a.strip()]
+                        char.role = CharacterRole(crole)
+                        char.age = cage if cage > 0 else None
+                        char.gender = cgender or None
+                        char.appearance = cappearance
+                        char.personality = cpersonality
+                        char.background = cbackground
+                        char.motivation = cmotivation
+                        char.arc = carc
+                        char.abilities = [a.strip() for a in cabilities.split(",") if a.strip()]
+                        char.notes = cnotes
+                        char.tags = [t.strip() for t in ctags.split(",") if t.strip()]
+                        char.relationships = {}
+                        for item in crels.split(","):
+                            if "=" in item:
+                                k, v = item.split("=", 1)
+                                char.relationships[k.strip()] = v.strip()
+                        project.updated_at = datetime.now().isoformat()
+                        save_project(project)
+                        st.success(f"人物 {cname} 已更新")
+                        st.rerun()
+
+                # 删除按钮放在表单外
+                if st.button("删除人物", key=f"del_char_{char.id}", type="secondary"):
+                    if char.id in project.characters:
+                        del project.characters[char.id]
+                        save_project(project)
+                        st.success(f"人物 {char.name} 已删除")
+                        st.rerun()
 
     with tab_add:
         with st.form("add_character"):
@@ -609,8 +654,28 @@ elif page == "故事大纲":
 
         if project.chapters:
             st.write("已有章节:")
-            for ch in sorted(project.chapters.values(), key=lambda c: c.sequence_number):
-                st.write(f"- 第{ch.sequence_number}章 《{ch.title}》 — {ch.outline_summary[:40]}...")
+            for ch_item in sorted(project.chapters.values(), key=lambda c: c.sequence_number):
+                with st.expander(f"第{ch_item.sequence_number}章 《{ch_item.title}》"):
+                    with st.form(f"edit_chapter_{ch_item.id}"):
+                        edit_title = st.text_input("章节标题", value=ch_item.title, key=f"edit_title_{ch_item.id}")
+                        edit_summary = st.text_area("章节摘要", value=ch_item.outline_summary, height=60, key=f"edit_summary_{ch_item.id}")
+                        col_save, col_del = st.columns([1, 1])
+                        with col_save:
+                            save_clicked = st.form_submit_button("保存修改")
+                        with col_del:
+                            del_clicked = st.form_submit_button("删除章节", type="secondary")
+
+                        if save_clicked:
+                            ch_item.title = edit_title.strip()
+                            ch_item.outline_summary = edit_summary
+                            save_project(project)
+                            st.success("已保存")
+                        elif del_clicked:
+                            if ch_item.id in project.chapters:
+                                del project.chapters[ch_item.id]
+                                save_project(project)
+                                st.success("章节已删除")
+                                st.rerun()
         else:
             st.info("暂无章节，可通过上方表单手动添加，或导入含章的详细大纲。")
 
@@ -800,13 +865,32 @@ elif page == "章节创作":
         st.warning("暂无章节，请先在【故事大纲】中添加章节或导入含章的详细大纲")
         st.stop()
 
-    # 章节选择
+    # 章节选择 — 使用 session_state 记住当前章节，避免 rerun 后跳回第一章
+    if "selected_chapter_id" not in st.session_state:
+        st.session_state.selected_chapter_id = None
+
     chapter_list = sorted(project.chapters.values(), key=lambda c: c.sequence_number)
+    chapter_ids = [c.id for c in chapter_list]
+
+    # 确保选中的章节在当前列表中
+    if st.session_state.selected_chapter_id not in chapter_ids:
+        st.session_state.selected_chapter_id = chapter_list[0].id
+
+    selected_index = chapter_ids.index(st.session_state.selected_chapter_id)
+
     selected_chapter = st.selectbox(
         "选择章节",
         options=chapter_list,
+        index=selected_index,
         format_func=lambda ch: f"第{ch.sequence_number}章 《{ch.title}》 [{ch.status.value}]",
     )
+
+    # 用户切换章节时更新 session_state 并清除生成缓存
+    if selected_chapter.id != st.session_state.selected_chapter_id:
+        st.session_state.selected_chapter_id = selected_chapter.id
+        st.session_state.generation_text = ""
+        st.rerun()
+
     ch = selected_chapter
 
     st.divider()
@@ -816,16 +900,40 @@ elif page == "章节创作":
 
     with col_left:
         st.subheader("📋 情节流程")
+        # 从 notes 中解析已保存的情感基调和情节点
+        _emotional_tone_default = ""
+        _plot_points_default = ""
+        if ch.notes:
+            _in_plot = False
+            for _line in ch.notes.splitlines():
+                if _line.startswith("情感基调:"):
+                    _emotional_tone_default = _line.split(":", 1)[1].strip()
+                elif _line.startswith("情节点:"):
+                    _in_plot = True
+                elif _in_plot:
+                    _plot_points_default += _line + "\n"
+            _plot_points_default = _plot_points_default.strip()
+
         with st.form("chapter_plan"):
             summary = st.text_area("本章摘要", value=ch.outline_summary, height=80)
-            plot_points = st.text_area("情节点（每行一个）", value="\n".join(ch.generation_history[-1].get("plot_points", []) if ch.generation_history else []), height=100)
-            emotional_tone = st.text_input("情感基调", value="")
+            plot_points = st.text_area("情节点（每行一个）", value=_plot_points_default, height=100)
+            emotional_tone = st.text_input("情感基调", value=_emotional_tone_default)
             if st.form_submit_button("保存"):
-                ch.outline_summary = summary
-                # plot_points 存在 generation_history 的最后一条记录里，作为备忘
-                ch.notes = f"情感基调: {emotional_tone}\n情节点:\n{plot_points}"
-                save_project(project)
-                st.success("已保存")
+                # 直接通过 project.chapters 修改，避免引用不一致问题
+                target_ch = project.chapters.get(ch.id)
+                if target_ch:
+                    target_ch.outline_summary = summary
+                    target_ch.notes = f"情感基调: {emotional_tone}\n情节点:\n{plot_points}"
+                    # 同步更新对应的大纲节点
+                    if project.outline:
+                        for node in project.outline.flatten_chapters():
+                            if node.chapter_id == ch.id or node.title == target_ch.title:
+                                node.summary = summary
+                                break
+                    save_project(project)
+                    st.success("已保存")
+                else:
+                    st.error("章节对象异常，请刷新页面重试")
 
         st.subheader("🎭 出场人物")
         char_options = {cid: project.characters[cid].name for cid in project.characters}
@@ -836,9 +944,26 @@ elif page == "章节创作":
             format_func=lambda x: char_options.get(x, x),
         )
         if st.button("更新出场人物"):
-            ch.characters_present = selected_chars
-            save_project(project)
-            st.success("已更新")
+            target_ch = project.chapters.get(ch.id)
+            if target_ch:
+                target_ch.characters_present = selected_chars
+                # 同步更新对应的大纲节点
+                if project.outline:
+                    for node in project.outline.flatten_chapters():
+                        if node.chapter_id == ch.id or node.title == target_ch.title:
+                            node.characters_involved = selected_chars
+                            break
+                save_project(project)
+                st.success("已更新")
+            else:
+                st.error("章节对象异常，请刷新页面重试")
+
+        # 剧情记忆展示
+        st.subheader("🧠 剧情记忆")
+        if ch.plot_memory:
+            st.info(ch.plot_memory)
+        else:
+            st.caption("点击「审校通过」后，AI 会自动分析本章内容并生成剧情记忆。")
 
     with col_mid:
         st.subheader("🌱 伏笔绑定")
@@ -881,6 +1006,12 @@ elif page == "章节创作":
             max_tokens = gen_cols[1].number_input("最大Token", 1000, 8000, 4000, 500)
 
             if st.button("生成章节", type="primary", use_container_width=True):
+                # 生成前检查必要字段
+                if not ch.outline_summary:
+                    st.warning("⚠️ 本章摘要为空，AI 可能无法按预期生成内容。请在左侧「情节流程」中填写并保存。")
+                if not ch.characters_present:
+                    st.warning("⚠️ 未选择出场人物，AI 可能自行编造角色。请在左侧「出场人物」中选择并更新。")
+
                 st.session_state.generation_text = ""
                 placeholder = st.empty()
                 st.session_state._gen_buffer = ""
@@ -917,9 +1048,48 @@ elif page == "章节创作":
             save_project(project)
             st.success(f"已保存，{ch.word_count} 字")
         if save_cols[1].button("审校通过", use_container_width=True):
+            # 先AI分析章节内容，提取剧情记忆、新人物、新地点
+            with st.spinner("正在分析章节内容..."):
+                try:
+                    analysis = pipeline.analyze_chapter(project, ch.id)
+                    summary = pipeline.apply_chapter_analysis(project, ch.id, analysis)
+                    # 显示分析结果
+                    if summary["plot_memory_saved"]:
+                        st.info(f"📖 已提取剧情记忆（{len(ch.plot_memory)}字）")
+                    if summary["new_chars_added"] > 0:
+                        st.info(f"👤 自动发现 {summary['new_chars_added']} 个新人物，已添加到人物设定")
+                    if summary["new_locs_added"] > 0:
+                        st.info(f"📍 自动发现 {summary['new_locs_added']} 个新地点，已添加到世界观")
+                except Exception as e:
+                    st.warning(f"章节分析失败（不影响审校）: {e}")
+
             pipeline.approve_chapter(project, ch.id)
             st.success("章节已标记为完成")
+            # 保持当前章节，不要跳回第一章
             st.rerun()
+
+    # 提示词与 Skill 展示
+    st.divider()
+    with st.expander("🔍 查看 AI 提示词与使用的 Skill", expanded=False):
+        try:
+            prompt_info = pipeline.prompt_builder.get_chapter_prompt_info(project, ch.id)
+
+            st.subheader("🛠️ 使用的 Skill")
+            if prompt_info["skills"]:
+                skill_cols = st.columns(3)
+                for idx, s in enumerate(prompt_info["skills"]):
+                    with skill_cols[idx % 3]:
+                        st.markdown(f"**{s['label']}**")
+                        st.caption(f"`{s['name']}`")
+                        if s.get("description"):
+                            st.write(s["description"])
+            else:
+                st.info("未使用任何 Skill（将使用默认提示词片段）")
+
+            st.subheader("📝 完整提示词")
+            st.code(prompt_info["prompt"], language="markdown")
+        except Exception as e:
+            st.error(f"获取提示词信息失败: {e}")
 
 
 # ---------- 页面：导出小说 ----------

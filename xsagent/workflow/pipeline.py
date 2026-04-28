@@ -3,6 +3,7 @@
 提供高阶 API 供 CLI / GUI 调用
 """
 
+import json
 from typing import Dict, List, Optional, Callable, Any
 from datetime import datetime
 
@@ -93,6 +94,11 @@ class CreationPipeline:
             sequence_number = max(
                 (c.sequence_number for c in project.chapters.values()), default=0
             ) + 1
+        else:
+            # 避免序号冲突，自动递增到可用序号
+            existing_seqs = {c.sequence_number for c in project.chapters.values()}
+            while sequence_number in existing_seqs:
+                sequence_number += 1
         ch = Chapter(
             title=title,
             sequence_number=sequence_number,
@@ -234,11 +240,21 @@ class CreationPipeline:
             return
         chapters = project.outline.flatten_chapters()
         existing_ids = {ch.id for ch in project.chapters.values()}
+        # 按标题建立已有章节的映射，避免重复创建同名章节
+        existing_by_title = {ch.title: ch for ch in project.chapters.values()}
         for i, node in enumerate(chapters, start=1):
             if node.chapter_id and node.chapter_id in project.chapters:
                 ch = project.chapters[node.chapter_id]
                 ch.sequence_number = i
                 ch.title = node.title
+                ch.outline_summary = node.summary
+                ch.characters_present = node.characters_involved
+                ch.locations = node.locations
+            elif node.title in existing_by_title:
+                # 复用已有同名章节，避免重复创建
+                ch = existing_by_title[node.title]
+                node.chapter_id = ch.id
+                ch.sequence_number = i
                 ch.outline_summary = node.summary
                 ch.characters_present = node.characters_involved
                 ch.locations = node.locations
@@ -253,6 +269,7 @@ class CreationPipeline:
                 )
                 node.chapter_id = ch.id
                 project.chapters[ch.id] = ch
+                existing_by_title[ch.title] = ch
 
     # --- 大纲树操作 ---
 
@@ -505,6 +522,135 @@ class CreationPipeline:
         if not result.success:
             raise RuntimeError(f"场景生成失败: {result.error_message}")
         return result.text
+
+    def analyze_chapter(
+        self,
+        project: NovelProject,
+        chapter_id: str,
+    ) -> Dict[str, Any]:
+        """
+        使用AI分析章节正文，提取剧情记忆、新人物、新地点
+        返回分析结果字典，不会自动保存到项目
+        """
+        if not self.generator:
+            raise RuntimeError("未配置 AI 生成器")
+
+        chapter = project.chapters.get(chapter_id)
+        if not chapter:
+            raise ValueError(f"章节不存在: {chapter_id}")
+
+        existing_char_names = {c.name for c in project.characters.values()}
+        existing_locations = set(project.world.locations.keys()) if project.world else set()
+
+        prompt = (
+            "请分析以下小说章节，提取结构化信息并以JSON格式返回。\n\n"
+            f"章节标题：{chapter.title}\n"
+            f"章节正文（前3000字）：\n{chapter.content[:3000]}\n\n"
+            "请提取以下信息：\n"
+            "1. plot_memory: 本章关键剧情摘要（200字以内），必须包含：\n"
+            "   - 关键情节转折和重要事件结果\n"
+            "   - 各主要人物在本章结束时的状态变化\n"
+            "   - 新出现的重要物品或能力\n"
+            "2. new_characters: 本章新出现的人物列表（已有同名人物不要重复），每人包含：\n"
+            "   - name: 姓名\n"
+            "   - role: 角色定位（protagonist主角/deuteragonist配角/antagonist反派/supporting次要角色/minor龙套）\n"
+            "   - description: 简短描述（外貌、性格、与本章的关系）\n"
+            "3. new_locations: 本章新出现的地点列表（已有同名地点不要重复），每个包含：\n"
+            "   - name: 地名\n"
+            "   - description: 简短描述\n\n"
+            f"已知已有人物（不要重复提取）：{', '.join(existing_char_names) or '无'}\n"
+            f"已知已有地点（不要重复提取）：{', '.join(existing_locations) or '无'}\n\n"
+            "返回严格JSON格式，不要任何额外解释或markdown代码块标记：\n"
+            '{\n  "plot_memory": "string",\n  "new_characters": [{"name": "...", "role": "...", "description": "..."}],\n  "new_locations": [{"name": "...", "description": "..."}]\n}'
+        )
+
+        request = create_request(
+            prompt=prompt,
+            system_message="你是一位专业的小说编辑，擅长提炼剧情要点和识别叙事要素。请严格按JSON格式输出。",
+            temperature=0.3,
+            max_tokens=2000,
+        )
+
+        result = self.generator.generate(request)
+        if not result.success:
+            raise RuntimeError(f"章节分析失败: {result.error_message}")
+
+        # 尝试解析JSON
+        text = result.text.strip()
+        # 去除可能的markdown代码块标记
+        if text.startswith("```"):
+            text = text.strip("`").strip()
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+
+        try:
+            analysis = json.loads(text)
+        except json.JSONDecodeError:
+            # 如果解析失败，返回原始文本作为plot_memory
+            analysis = {
+                "plot_memory": text[:500],
+                "new_characters": [],
+                "new_locations": [],
+            }
+
+        return analysis
+
+    def apply_chapter_analysis(
+        self,
+        project: NovelProject,
+        chapter_id: str,
+        analysis: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        将章节分析结果应用到项目中：
+        - 保存 plot_memory 到章节
+        - 新增人物到人物设定
+        - 新增地点到世界观
+        返回应用摘要 {"plot_memory_saved": bool, "new_chars_added": int, "new_locs_added": int}
+        """
+        chapter = project.chapters.get(chapter_id)
+        if not chapter:
+            raise ValueError(f"章节不存在: {chapter_id}")
+
+        summary = {"plot_memory_saved": False, "new_chars_added": 0, "new_locs_added": 0}
+
+        # 保存剧情记忆
+        plot_memory = analysis.get("plot_memory", "")
+        if plot_memory:
+            chapter.plot_memory = plot_memory
+            summary["plot_memory_saved"] = True
+
+        # 添加新人物
+        existing_names = {c.name for c in project.characters.values()}
+        for char_data in analysis.get("new_characters", []):
+            name = char_data.get("name", "").strip()
+            if name and name not in existing_names:
+                role_str = char_data.get("role", "supporting")
+                try:
+                    role = CharacterRole(role_str.lower())
+                except ValueError:
+                    role = CharacterRole.SUPPORTING
+                char = Character(
+                    name=name,
+                    role=role,
+                    personality=char_data.get("description", ""),
+                )
+                project.characters[char.id] = char
+                existing_names.add(name)
+                summary["new_chars_added"] += 1
+
+        # 添加新地点
+        if project.world:
+            for loc_data in analysis.get("new_locations", []):
+                name = loc_data.get("name", "").strip()
+                desc = loc_data.get("description", "").strip()
+                if name and name not in project.world.locations:
+                    project.world.locations[name] = desc
+                    summary["new_locs_added"] += 1
+
+        project.updated_at = datetime.now().isoformat()
+        self.storage.save(project)
+        return summary
 
     def approve_chapter(self, project: NovelProject, chapter_id: str) -> Chapter:
         """审校通过章节"""
