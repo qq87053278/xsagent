@@ -38,6 +38,33 @@ class ForeshadowingStatus(str, Enum):
     ABANDONED = "abandoned"          # 已废弃
 
 
+class BranchStatus(str, Enum):
+    """分支剧情状态"""
+    OPEN = "open"                    # 已开启，待推进
+    IN_PROGRESS = "in_progress"      # 正在推进中
+    RESOLVED = "resolved"            # 已收束/完结
+    ABANDONED = "abandoned"          # 已废弃
+
+
+class LocationStatus(str, Enum):
+    """地点状态"""
+    ACTIVE = "active"                # 正常存在
+    DESTROYED = "destroyed"          # 已毁灭
+    HIDDEN = "hidden"                # 隐藏/秘密
+    LOST = "lost"                    # 已失落/不可达
+    UNDER_CONSTRUCTION = "under_construction"  # 建造中
+
+
+class FactionStatus(str, Enum):
+    """势力状态"""
+    ACTIVE = "active"                # 活跃
+    DISSOLVED = "dissolved"          # 已解散
+    HIDDEN = "hidden"                # 隐秘
+    AT_WAR = "at_war"                # 交战中
+    DECLINING = "declining"          # 衰落中
+    RISING = "rising"                # 崛起中
+
+
 @dataclass
 class Character:
     """人物设定卡片"""
@@ -54,6 +81,10 @@ class Character:
     arc: str = ""                           # 人物弧线（成长轨迹）
     relationships: Dict[str, str] = field(default_factory=dict)  # 关系网 {角色名: 关系}
     abilities: List[str] = field(default_factory=list)  # 能力/技能
+    artifacts: str = ""                     # 法宝描述
+    spells_skills: str = ""                 # 法术/技能详细描述
+    faction_id: Optional[str] = None        # 核心绑定势力ID
+    faction_notes: str = ""                 # 势力关系描述（多势力时记录其他势力）
     notes: str = ""                         # 备忘笔记
     tags: List[str] = field(default_factory=list)
 
@@ -123,6 +154,57 @@ class Foreshadowing:
 
 
 @dataclass
+class Location:
+    """地点 — 支持层级管理与状态追踪"""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str = ""                        # 地点名称
+    description: str = ""                 # 地点描述
+    status: LocationStatus = LocationStatus.ACTIVE
+    level: str = "normal"                 # 级别: minor / normal / important / core / sacred
+    hierarchy: str = ""                   # 层级位置，如"东方大陆 > 青云国 > 京城"
+    scale: str = ""                       # 规模: 小型村落 / 中型城市 / 大型宗门 等
+    parent_location_id: Optional[str] = None  # 父地点ID
+    tags: List[str] = field(default_factory=list)
+    notes: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["status"] = self.status.value
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Location":
+        data = dict(data)
+        data["status"] = LocationStatus(data.get("status", "active"))
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class Faction:
+    """势力/组织 — 支持地点绑定与状态追踪"""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str = ""                        # 势力名称
+    description: str = ""                 # 势力描述
+    status: FactionStatus = FactionStatus.ACTIVE
+    level: str = "normal"                 # 级别: minor / normal / important / major / supreme
+    location_id: Optional[str] = None     # 绑定地点ID
+    leader_character_id: Optional[str] = None  # 首领人物ID
+    tags: List[str] = field(default_factory=list)
+    notes: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["status"] = self.status.value
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Faction":
+        data = dict(data)
+        data["status"] = FactionStatus(data.get("status", "active"))
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class StyleReference:
     """文笔风格参考 — 支持知名作者模仿"""
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
@@ -146,11 +228,37 @@ class StyleReference:
 
 
 @dataclass
+class BranchPlot:
+    """分支剧情 — 章节中产生的可延续支线"""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    title: str = ""                       # 分支名称
+    description: str = ""                 # 分支描述/触发事件
+    status: BranchStatus = BranchStatus.OPEN
+    origin_chapter_id: Optional[str] = None   # 起源章节ID
+    progress_chapter_ids: List[str] = field(default_factory=list)  # 推进过的章节ID
+    importance: str = "medium"            # 重要性: minor / medium / major
+    notes: str = ""                       # 进展记录/备忘
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["status"] = self.status.value
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "BranchPlot":
+        data = dict(data)
+        data["status"] = BranchStatus(data.get("status", "open"))
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class OutlineNode:
-    """大纲节点 — 支持卷/幕/章多级嵌套"""
+    """大纲节点 — 支持总纲/卷/幕/章多级嵌套"""
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     title: str = ""                         # 节点标题
-    level: int = 1                          # 层级 1=卷 2=幕 3=章
+    level: int = 0                          # 层级 0=总纲 1=卷 2=幕 3=章
     summary: str = ""                       # 内容摘要
     plot_points: List[str] = field(default_factory=list)  # 关键情节点
     characters_involved: List[str] = field(default_factory=list)  # 涉及角色ID
@@ -175,6 +283,12 @@ class OutlineNode:
         node = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
         node.children = [cls.from_dict(c) for c in children_data]
         return node
+
+    LEVEL_NAMES = {0: "总纲", 1: "卷", 2: "幕", 3: "章"}
+
+    @property
+    def level_name(self) -> str:
+        return self.LEVEL_NAMES.get(self.level, "未知")
 
     def flatten_chapters(self) -> List["OutlineNode"]:
         """展平所有 level=3 的章节节点"""
@@ -265,6 +379,8 @@ class GenerationContext:
     relevant_characters: List[Dict[str, Any]] = field(default_factory=list)
     outline_path: List[str] = field(default_factory=list)  # 当前节点路径 [卷, 幕, 章]
     current_node: Optional[OutlineNode] = None
+    volume_summary: str = ""                # 所属卷的摘要（轻度影响）
+    act_summary: str = ""                   # 所属幕的摘要（高度影响）
     previous_chapter_summary: str = ""      # 前一章摘要（保证衔接）
     style_directives: List[str] = field(default_factory=list)
     constraints: List[str] = field(default_factory=list)     # 硬性约束
@@ -277,6 +393,7 @@ class GenerationContext:
     previous_chapter_content: str = ""        # 前一章结尾片段（用于衔接）
     previous_chapter_plot_memory: str = ""    # 前一章的剧情记忆
     previous_plot_memories: List[str] = field(default_factory=list)  # 前2-5章的剧情记忆
+    branch_directives: List[str] = field(default_factory=list)  # 分支剧情指令
 
     def to_dict(self) -> Dict[str, Any]:
         data = {
@@ -285,6 +402,8 @@ class GenerationContext:
             "relevant_characters": self.relevant_characters,
             "outline_path": self.outline_path,
             "current_node": self.current_node.to_dict() if self.current_node else None,
+            "volume_summary": self.volume_summary,
+            "act_summary": self.act_summary,
             "previous_chapter_summary": self.previous_chapter_summary,
             "previous_chapter_content": self.previous_chapter_content,
             "previous_chapter_plot_memory": self.previous_chapter_plot_memory,
@@ -297,6 +416,7 @@ class GenerationContext:
             "mimicry_mode": self.mimicry_mode,
             "reference_author": self.reference_author,
             "previous_plot_memories": self.previous_plot_memories,
+            "branch_directives": self.branch_directives,
         }
         return data
 
@@ -316,6 +436,9 @@ class NovelProject:
     skill_bindings: Dict[str, str] = field(default_factory=dict)    # {skill_type: skill_name}
     foreshadowings: Dict[str, Foreshadowing] = field(default_factory=dict)  # {id: Foreshadowing}
     style_references: Dict[str, StyleReference] = field(default_factory=dict)  # {id: StyleReference}
+    branch_plots: Dict[str, BranchPlot] = field(default_factory=dict)  # {id: BranchPlot}
+    locations: Dict[str, Location] = field(default_factory=dict)  # {id: Location}
+    factions: Dict[str, Faction] = field(default_factory=dict)  # {id: Faction}
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
     version: str = "1.0.0"
@@ -334,6 +457,9 @@ class NovelProject:
             "skill_bindings": self.skill_bindings,
             "foreshadowings": {k: v.to_dict() for k, v in self.foreshadowings.items()},
             "style_references": {k: v.to_dict() for k, v in self.style_references.items()},
+            "branch_plots": {k: v.to_dict() for k, v in self.branch_plots.items()},
+            "locations": {k: v.to_dict() for k, v in self.locations.items()},
+            "factions": {k: v.to_dict() for k, v in self.factions.items()},
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "version": self.version,
@@ -349,17 +475,52 @@ class NovelProject:
         style_data = data.pop("style", {})
         foreshadowings_data = data.pop("foreshadowings", {})
         style_refs_data = data.pop("style_references", {})
+        branch_plots_data = data.pop("branch_plots", {})
+        locations_data = data.pop("locations", {})
+        factions_data = data.pop("factions", {})
 
         project = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
         if world_data:
             project.world = WorldBuilding.from_dict(world_data)
+            # 兼容旧数据：将 world.locations (Dict[str,str]) 迁移为独立 Location 对象
+            if project.world and project.world.locations and not locations_data:
+                for loc_name, loc_desc in project.world.locations.items():
+                    loc = Location(name=loc_name, description=loc_desc)
+                    project.locations[loc.id] = loc
+            # 兼容旧数据：将 world.factions (Dict[str,str]) 迁移为独立 Faction 对象
+            if project.world and project.world.factions and not factions_data:
+                for fac_name, fac_desc in project.world.factions.items():
+                    fac = Faction(name=fac_name, description=fac_desc)
+                    project.factions[fac.id] = fac
         if outline_data:
+            # 兼容旧数据：如果根节点 level != 0，自动包装为总纲
+            if outline_data.get("level", 0) != 0:
+                old_root = dict(outline_data)
+                outline_data = {
+                    "id": str(uuid.uuid4())[:8],
+                    "title": "全书总纲",
+                    "level": 0,
+                    "summary": "",
+                    "plot_points": [],
+                    "characters_involved": [],
+                    "locations": [],
+                    "emotional_tone": "",
+                    "foreshadowing": [],
+                    "foreshadowing_ids": [],
+                    "callbacks": [],
+                    "children": [old_root],
+                    "chapter_id": None,
+                    "notes": "",
+                }
             project.outline = OutlineNode.from_dict(outline_data)
         project.characters = {k: Character.from_dict(v) for k, v in characters_data.items()}
         project.chapters = {k: Chapter.from_dict(v) for k, v in chapters_data.items()}
         project.style = StyleGuide.from_dict(style_data)
         project.foreshadowings = {k: Foreshadowing.from_dict(v) for k, v in foreshadowings_data.items()}
         project.style_references = {k: StyleReference.from_dict(v) for k, v in style_refs_data.items()}
+        project.branch_plots = {k: BranchPlot.from_dict(v) for k, v in branch_plots_data.items()}
+        project.locations = {k: Location.from_dict(v) for k, v in locations_data.items()}
+        project.factions = {k: Faction.from_dict(v) for k, v in factions_data.items()}
         return project
 
     def get_character(self, character_id: str) -> Optional[Character]:
@@ -413,6 +574,13 @@ class NovelProject:
                 if node.chapter_id == chapter_id:
                     ctx.current_node = node
                     ctx.outline_path = self._trace_outline_path(node)
+                    # 提取所属卷和幕的摘要
+                    path_nodes = self._trace_outline_path_nodes(node)
+                    for pn in path_nodes:
+                        if pn.level == 1:
+                            ctx.volume_summary = pn.summary
+                        elif pn.level == 2:
+                            ctx.act_summary = pn.summary
                     break
             # fallback: 若通过 chapter_id 未匹配到（如手动添加的章节），尝试多种方式匹配
             if not ctx.current_node:
@@ -423,12 +591,24 @@ class NovelProject:
                         if node.title == ch.title:
                             ctx.current_node = node
                             ctx.outline_path = self._trace_outline_path(node)
+                            path_nodes = self._trace_outline_path_nodes(node)
+                            for pn in path_nodes:
+                                if pn.level == 1:
+                                    ctx.volume_summary = pn.summary
+                                elif pn.level == 2:
+                                    ctx.act_summary = pn.summary
                             node.chapter_id = chapter_id
                             break
                     # 2. 如果只有一个章节节点，直接匹配
                     if not ctx.current_node and len(flat) == 1:
                         ctx.current_node = flat[0]
                         ctx.outline_path = self._trace_outline_path(flat[0])
+                        path_nodes = self._trace_outline_path_nodes(flat[0])
+                        for pn in path_nodes:
+                            if pn.level == 1:
+                                ctx.volume_summary = pn.summary
+                            elif pn.level == 2:
+                                ctx.act_summary = pn.summary
                         flat[0].chapter_id = chapter_id
                     # 3. 模糊标题匹配（互相包含）
                     if not ctx.current_node:
@@ -438,6 +618,12 @@ class NovelProject:
                             if node_title_clean in ch_title_clean or ch_title_clean in node_title_clean:
                                 ctx.current_node = node
                                 ctx.outline_path = self._trace_outline_path(node)
+                                path_nodes = self._trace_outline_path_nodes(node)
+                                for pn in path_nodes:
+                                    if pn.level == 1:
+                                        ctx.volume_summary = pn.summary
+                                    elif pn.level == 2:
+                                        ctx.act_summary = pn.summary
                                 node.chapter_id = chapter_id
                                 break
 
@@ -513,9 +699,24 @@ class NovelProject:
         return ctx
 
     def _trace_outline_path(self, target: OutlineNode) -> List[str]:
-        """追溯大纲路径"""
+        """追溯大纲路径（返回标题列表）"""
         def search(node: OutlineNode, path: List[str]) -> Optional[List[str]]:
             current = path + [node.title]
+            if node.id == target.id:
+                return current
+            for child in node.children:
+                result = search(child, current)
+                if result:
+                    return result
+            return None
+        if self.outline:
+            return search(self.outline, []) or []
+        return []
+
+    def _trace_outline_path_nodes(self, target: OutlineNode) -> List[OutlineNode]:
+        """追溯大纲路径（返回节点列表）"""
+        def search(node: OutlineNode, path: List[OutlineNode]) -> Optional[List[OutlineNode]]:
+            current = path + [node]
             if node.id == target.id:
                 return current
             for child in node.children:

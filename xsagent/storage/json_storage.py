@@ -225,7 +225,8 @@ class JSONStorage:
 
         def walk(node: Any, depth: int = 0) -> None:
             prefix = "  " * depth
-            lines.append(f"{prefix}- **{node.title}**")
+            level_tag = {0: "【总纲】", 1: "【卷】", 2: "【幕】", 3: "【章】"}.get(node.level, "")
+            lines.append(f"{prefix}- {level_tag} {node.title}")
             if node.summary:
                 lines.append(f"{prefix}  - 摘要: {node.summary}")
             if node.plot_points:

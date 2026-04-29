@@ -10,7 +10,8 @@ from datetime import datetime
 from xsagent.core.models import (
     NovelProject, Chapter, ChapterStatus, Character, WorldBuilding,
     OutlineNode, StyleGuide, CharacterRole, Foreshadowing, ForeshadowingStatus,
-    StyleReference
+    StyleReference, BranchPlot, BranchStatus,
+    Location, LocationStatus, Faction, FactionStatus
 )
 from xsagent.generator.base import BaseGenerator, GenerationRequest, create_request
 from xsagent.generator.prompt_builder import PromptBuilder
@@ -228,6 +229,15 @@ class CreationPipeline:
 
     def set_outline(self, project: NovelProject, outline: OutlineNode) -> None:
         """设置小说大纲"""
+        # 兼容旧数据：如果根节点 level != 0，自动包装为总纲
+        if outline.level != 0:
+            old_root = outline
+            outline = OutlineNode(
+                title="全书总纲",
+                level=0,
+                summary="",
+                children=[old_root],
+            )
         project.outline = outline
         # 自动同步创建章节占位
         self._sync_chapters_from_outline(project)
@@ -245,7 +255,9 @@ class CreationPipeline:
         for i, node in enumerate(chapters, start=1):
             if node.chapter_id and node.chapter_id in project.chapters:
                 ch = project.chapters[node.chapter_id]
-                ch.sequence_number = i
+                # 只在没有设置过序号时才按遍历顺序分配，避免覆盖用户手动指定的序号
+                if ch.sequence_number == 0:
+                    ch.sequence_number = i
                 ch.title = node.title
                 ch.outline_summary = node.summary
                 ch.characters_present = node.characters_involved
@@ -254,7 +266,8 @@ class CreationPipeline:
                 # 复用已有同名章节，避免重复创建
                 ch = existing_by_title[node.title]
                 node.chapter_id = ch.id
-                ch.sequence_number = i
+                if ch.sequence_number == 0:
+                    ch.sequence_number = i
                 ch.outline_summary = node.summary
                 ch.characters_present = node.characters_involved
                 ch.locations = node.locations
@@ -330,14 +343,26 @@ class CreationPipeline:
         """在大纲中新增节点。parent_id 为 None 时添加到根节点下"""
         if not project.outline:
             raise ValueError("项目尚无大纲")
-        node = OutlineNode(title=title, level=level, summary=summary)
+
         if parent_id is None or parent_id == project.outline.id:
-            project.outline.children.append(node)
+            parent = project.outline
         else:
             parent = self._find_outline_node(project.outline, parent_id)
-            if not parent:
-                raise ValueError(f"父节点不存在: {parent_id}")
-            parent.children.append(node)
+
+        if not parent:
+            raise ValueError(f"父节点不存在: {parent_id}")
+
+        # 自动推断并约束 level
+        expected_level = parent.level + 1
+        if level < expected_level:
+            level = expected_level
+        if level > 3:
+            level = 3
+        if parent.level >= 3:
+            raise ValueError("章节点下不能再添加子节点")
+
+        node = OutlineNode(title=title, level=level, summary=summary)
+        parent.children.append(node)
         # 若新增的是章级节点，自动同步创建章节占位
         if level == 3:
             self._sync_chapters_from_outline(project)
@@ -529,7 +554,7 @@ class CreationPipeline:
         chapter_id: str,
     ) -> Dict[str, Any]:
         """
-        使用AI分析章节正文，提取剧情记忆、新人物、新地点
+        使用AI分析章节正文，提取剧情记忆、新人物、新地点、分支剧情
         返回分析结果字典，不会自动保存到项目
         """
         if not self.generator:
@@ -541,34 +566,81 @@ class CreationPipeline:
 
         existing_char_names = {c.name for c in project.characters.values()}
         existing_locations = set(project.world.locations.keys()) if project.world else set()
+        existing_branches = {
+            b.title: b.description
+            for b in project.branch_plots.values()
+            if b.status in (BranchStatus.OPEN, BranchStatus.IN_PROGRESS)
+        }
 
-        prompt = (
-            "请分析以下小说章节，提取结构化信息并以JSON格式返回。\n\n"
-            f"章节标题：{chapter.title}\n"
-            f"章节正文（前3000字）：\n{chapter.content[:3000]}\n\n"
-            "请提取以下信息：\n"
-            "1. plot_memory: 本章关键剧情摘要（200字以内），必须包含：\n"
-            "   - 关键情节转折和重要事件结果\n"
-            "   - 各主要人物在本章结束时的状态变化\n"
-            "   - 新出现的重要物品或能力\n"
-            "2. new_characters: 本章新出现的人物列表（已有同名人物不要重复），每人包含：\n"
-            "   - name: 姓名\n"
-            "   - role: 角色定位（protagonist主角/deuteragonist配角/antagonist反派/supporting次要角色/minor龙套）\n"
-            "   - description: 简短描述（外貌、性格、与本章的关系）\n"
-            "3. new_locations: 本章新出现的地点列表（已有同名地点不要重复），每个包含：\n"
-            "   - name: 地名\n"
-            "   - description: 简短描述\n\n"
-            f"已知已有人物（不要重复提取）：{', '.join(existing_char_names) or '无'}\n"
-            f"已知已有地点（不要重复提取）：{', '.join(existing_locations) or '无'}\n\n"
-            "返回严格JSON格式，不要任何额外解释或markdown代码块标记：\n"
-            '{\n  "plot_memory": "string",\n  "new_characters": [{"name": "...", "role": "...", "description": "..."}],\n  "new_locations": [{"name": "...", "description": "..."}]\n}'
-        )
+        existing_faction_names = {f.name for f in project.factions.values()}
+
+        branches_text = ""
+        if existing_branches:
+            for title, desc in existing_branches.items():
+                branches_text += f"  - {title}: {desc}\n"
+        else:
+            branches_text = "  无\n"
+
+        prompt = f"""请分析以下小说章节，提取结构化信息并以JSON格式返回。
+
+章节标题：{chapter.title}
+章节正文（前3000字）：
+{chapter.content[:3000]}
+
+请提取以下信息：
+1. plot_memory: 本章关键剧情摘要（200字以内），必须包含：
+   - 关键情节转折和重要事件结果
+   - 各主要人物在本章结束时的状态变化
+   - 新出现的重要物品或能力
+2. new_characters: 本章新出现的人物列表（已有同名人物不要重复），每人包含：
+   - name: 姓名
+   - role: 角色定位（protagonist主角/deuteragonist配角/antagonist反派/supporting次要角色/minor龙套）
+   - description: 简短描述（外貌、性格、与本章的关系）
+   - faction_name: 所属势力名称（如果有且与已有势力匹配，否则留空）
+   - faction_affinity: 势力关系描述（如核心成员、外围弟子、敌对等，多势力可描述次要关系）
+   - artifacts: 法宝描述（如持有或使用的重要物品/武器/法宝，没有则留空）
+   - spells_skills: 法术/技能描述（如修炼功法、特殊能力、战斗技能等，没有则留空）
+3. new_locations: 本章新出现的地点列表（已有同名地点不要重复），每个包含：
+   - name: 地名
+   - description: 简短描述
+   - status: 地点状态（active正常/destroyed已毁灭/hidden隐藏/lost失落/under_construction建造中）
+   - level: 级别（minor次要/normal一般/important重要/core核心/sacred圣地）
+   - hierarchy: 层级位置（如东方大陆 > 青云国 > 京城，简单地点可留空）
+   - scale: 规模（如小型村落/中型城市/大型宗门/秘境等）
+4. new_factions: 本章新出现的势力/组织列表（已有同名势力不要重复），每个包含：
+   - name: 势力名称
+   - description: 势力描述
+   - status: 势力状态（active活跃/dissolved已解散/hidden隐秘/at_war交战中/declining衰落中/rising崛起中）
+   - level: 级别（minor次要/normal一般/important重要/major大宗/supreme至高）
+   - location_name: 绑定地点名称（如果该势力有固定据点且地点已存在，填写名称匹配；否则留空）
+5. branch_plots: 本章中新开启或可延续的分支剧情列表。分支剧情是指：
+   - 本章中埋下但尚未解决的悬念/冲突
+   - 新出现的支线任务或人物目标
+   - 可独立发展的情节线索（与主线并行但不干扰主线）
+   每个分支包含：
+   - title: 分支名称（简洁概括）
+   - description: 触发事件与当前状态描述
+   - importance: 重要性（minor次要/medium一般/major重要）
+   注意：如果本章只是推进了已有分支而非开启新分支，请返回空列表。
+
+已知已有人物（不要重复提取）：{', '.join(existing_char_names) or '无'}
+已知已有地点（不要重复提取）：{', '.join(existing_locations) or '无'}
+已知已有势力（不要重复提取）：{', '.join(existing_faction_names) or '无'}
+已知已有活跃分支（如果本章只是推进它们，请返回空列表，不要重复创建）：
+{branches_text}
+返回严格JSON格式，不要任何额外解释或markdown代码块标记：
+{{"plot_memory": "string",
+  "new_characters": [{{"name": "...", "role": "...", "description": "...", "faction_name": "...", "faction_affinity": "...", "artifacts": "...", "spells_skills": "..."}}],
+  "new_locations": [{{"name": "...", "description": "...", "status": "...", "level": "...", "hierarchy": "...", "scale": "..."}}],
+  "new_factions": [{{"name": "...", "description": "...", "status": "...", "level": "...", "location_name": "..."}}],
+  "branch_plots": [{{"title": "...", "description": "...", "importance": "..."}}]
+}}"""
 
         request = create_request(
             prompt=prompt,
             system_message="你是一位专业的小说编辑，擅长提炼剧情要点和识别叙事要素。请严格按JSON格式输出。",
             temperature=0.3,
-            max_tokens=2000,
+            max_tokens=2500,
         )
 
         result = self.generator.generate(request)
@@ -591,6 +663,8 @@ class CreationPipeline:
                 "plot_memory": text[:500],
                 "new_characters": [],
                 "new_locations": [],
+                "new_factions": [],
+                "branch_plots": [],
             }
 
         return analysis
@@ -604,15 +678,24 @@ class CreationPipeline:
         """
         将章节分析结果应用到项目中：
         - 保存 plot_memory 到章节
-        - 新增人物到人物设定
-        - 新增地点到世界观
-        返回应用摘要 {"plot_memory_saved": bool, "new_chars_added": int, "new_locs_added": int}
+        - 新增人物到人物设定（含势力绑定）
+        - 新增地点到地点列表
+        - 新增势力到势力列表
+        - 新增分支剧情到分支列表
+        返回应用摘要 {"plot_memory_saved": bool, "new_chars_added": int, "new_locs_added": int, "new_factions_added": int, "new_branches_added": int, "faction_bindings": int}
         """
         chapter = project.chapters.get(chapter_id)
         if not chapter:
             raise ValueError(f"章节不存在: {chapter_id}")
 
-        summary = {"plot_memory_saved": False, "new_chars_added": 0, "new_locs_added": 0}
+        summary = {
+            "plot_memory_saved": False,
+            "new_chars_added": 0,
+            "new_locs_added": 0,
+            "new_factions_added": 0,
+            "new_branches_added": 0,
+            "faction_bindings": 0,
+        }
 
         # 保存剧情记忆
         plot_memory = analysis.get("plot_memory", "")
@@ -620,7 +703,10 @@ class CreationPipeline:
             chapter.plot_memory = plot_memory
             summary["plot_memory_saved"] = True
 
-        # 添加新人物
+        # 建立名称到ID的映射
+        faction_name_to_id = {f.name: fid for fid, f in project.factions.items()}
+
+        # 添加新人物 + 势力绑定
         existing_names = {c.name for c in project.characters.values()}
         for char_data in analysis.get("new_characters", []):
             name = char_data.get("name", "").strip()
@@ -634,19 +720,89 @@ class CreationPipeline:
                     name=name,
                     role=role,
                     personality=char_data.get("description", ""),
+                    artifacts=char_data.get("artifacts", ""),
+                    spells_skills=char_data.get("spells_skills", ""),
                 )
+                # 尝试绑定势力
+                fac_name = char_data.get("faction_name", "").strip()
+                fac_affinity = char_data.get("faction_affinity", "").strip()
+                if fac_name and fac_name in faction_name_to_id:
+                    char.faction_id = faction_name_to_id[fac_name]
+                    summary["faction_bindings"] += 1
+                if fac_affinity:
+                    char.faction_notes = fac_affinity
                 project.characters[char.id] = char
                 existing_names.add(name)
                 summary["new_chars_added"] += 1
 
+        # 对已有人物也尝试更新势力绑定
+        for char_data in analysis.get("new_characters", []):
+            name = char_data.get("name", "").strip()
+            fac_name = char_data.get("faction_name", "").strip()
+            fac_affinity = char_data.get("faction_affinity", "").strip()
+            if name and fac_name and fac_name in faction_name_to_id:
+                for char in project.characters.values():
+                    if char.name == name and not char.faction_id:
+                        char.faction_id = faction_name_to_id[fac_name]
+                        if fac_affinity:
+                            char.faction_notes = fac_affinity
+                        summary["faction_bindings"] += 1
+                        break
+
         # 添加新地点
-        if project.world:
-            for loc_data in analysis.get("new_locations", []):
-                name = loc_data.get("name", "").strip()
-                desc = loc_data.get("description", "").strip()
-                if name and name not in project.world.locations:
-                    project.world.locations[name] = desc
-                    summary["new_locs_added"] += 1
+        existing_loc_names = {loc.name for loc in project.locations.values()}
+        for loc_data in analysis.get("new_locations", []):
+            name = loc_data.get("name", "").strip()
+            if name and name not in existing_loc_names:
+                loc = Location(
+                    name=name,
+                    description=loc_data.get("description", ""),
+                    status=LocationStatus(loc_data.get("status", "active").lower()),
+                    level=loc_data.get("level", "normal"),
+                    hierarchy=loc_data.get("hierarchy", ""),
+                    scale=loc_data.get("scale", ""),
+                )
+                project.locations[loc.id] = loc
+                existing_loc_names.add(name)
+                summary["new_locs_added"] += 1
+
+        # 添加新势力
+        existing_fac_names = {f.name for f in project.factions.values()}
+        for fac_data in analysis.get("new_factions", []):
+            name = fac_data.get("name", "").strip()
+            if name and name not in existing_fac_names:
+                fac = Faction(
+                    name=name,
+                    description=fac_data.get("description", ""),
+                    status=FactionStatus(fac_data.get("status", "active").lower()),
+                    level=fac_data.get("level", "normal"),
+                )
+                # 尝试绑定地点
+                loc_name = fac_data.get("location_name", "").strip()
+                if loc_name:
+                    for loc in project.locations.values():
+                        if loc.name == loc_name:
+                            fac.location_id = loc.id
+                            break
+                project.factions[fac.id] = fac
+                existing_fac_names.add(name)
+                summary["new_factions_added"] += 1
+
+        # 添加新分支剧情
+        existing_branch_titles = {b.title for b in project.branch_plots.values()}
+        for branch_data in analysis.get("branch_plots", []):
+            title = branch_data.get("title", "").strip()
+            if title and title not in existing_branch_titles:
+                branch = BranchPlot(
+                    title=title,
+                    description=branch_data.get("description", ""),
+                    importance=branch_data.get("importance", "medium"),
+                    origin_chapter_id=chapter_id,
+                    status=BranchStatus.OPEN,
+                )
+                project.branch_plots[branch.id] = branch
+                existing_branch_titles.add(title)
+                summary["new_branches_added"] += 1
 
         project.updated_at = datetime.now().isoformat()
         self.storage.save(project)

@@ -237,25 +237,39 @@ def cmd_quickstart(args, pipeline: CreationPipeline, storage: JSONStorage):
 
     # 创建大纲
     outline = OutlineNode(
-        title="第一卷：暗流",
-        level=1,
+        title="全书总纲",
+        level=0,
         summary="林澈在边缘星区偶然发现妹妹的线索，被迫卷入联邦与蚀化者的暗战。",
         children=[
             OutlineNode(
-                title="第一章：走私者的日常",
-                level=3,
-                summary="林澈在废弃空间站交货，收到一条来自妹妹的加密求救信号。",
-                plot_points=["展示林澈的日常生活与走私技能", "收到加密信号", "决定追查信号来源"],
-                characters_involved=[c1.id],
-                emotional_tone="紧张中带有些许孤独",
-            ),
-            OutlineNode(
-                title="第二章：不速之客",
-                level=3,
-                summary="联邦特工艾薇找上门来，两人的初次交锋充满火药味。",
-                plot_points=["艾薇追踪走私线索找到林澈", "双方短暂交手", "发现彼此目标一致，被迫合作"],
-                characters_involved=[c1.id, c2.id],
-                emotional_tone="冲突、试探、不信任",
+                title="第一卷：暗流",
+                level=1,
+                summary="卷摘要",
+                children=[
+                    OutlineNode(
+                        title="第一幕：觉醒",
+                        level=2,
+                        summary="幕摘要",
+                        children=[
+                            OutlineNode(
+                                title="第一章：走私者的日常",
+                                level=3,
+                                summary="林澈在废弃空间站交货，收到一条来自妹妹的加密求救信号。",
+                                plot_points=["展示林澈的日常生活与走私技能", "收到加密信号", "决定追查信号来源"],
+                                characters_involved=[c1.id],
+                                emotional_tone="紧张中带有些许孤独",
+                            ),
+                            OutlineNode(
+                                title="第二章：不速之客",
+                                level=3,
+                                summary="联邦特工艾薇找上门来，两人的初次交锋充满火药味。",
+                                plot_points=["艾薇追踪走私线索找到林澈", "双方短暂交手", "发现彼此目标一致，被迫合作"],
+                                characters_involved=[c1.id, c2.id],
+                                emotional_tone="冲突、试探、不信任",
+                            ),
+                        ]
+                    ),
+                ]
             ),
         ]
     )

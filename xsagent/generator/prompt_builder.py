@@ -64,6 +64,9 @@ class PromptBuilder:
         world_skill = self._get_skill(bindings, "world_building")
         if world_skill:
             w = project.world
+            # 使用新的独立 locations / factions
+            locations_text = self._format_locations(project.locations.values()) if project.locations else ""
+            factions_text = self._format_factions(project.factions.values(), project.locations) if project.factions else ""
             world_ctx = {
                 "world_summary": ctx.world_summary,
                 "world_name": w.name if w else "",
@@ -74,14 +77,14 @@ class PromptBuilder:
                 "world_power_system": w.power_system if w else "",
                 "world_society": w.society if w else "",
                 "world_rules": "\n".join(f"- {r}" for r in (w.rules if w else [])),
-                "world_locations": "\n".join(f"- {k}: {v}" for k, v in (w.locations.items() if w else {})),
-                "world_factions": "\n".join(f"- {k}: {v}" for k, v in (w.factions.items() if w else {})),
+                "world_locations": locations_text,
+                "world_factions": factions_text,
                 "world_customs": "\n".join(f"- {c}" for c in (w.customs if w else [])),
                 "world_notes": w.notes if w else "",
             }
             sections.append(world_skill.render(world_ctx))
         else:
-            sections.append(self._default_world_section(ctx.world_summary))
+            sections.append(self._default_world_section(ctx.world_summary, project))
 
         # === 3. 大纲约束 (Skill: plot_generation) ===
         plot_skill = self._get_skill(bindings, "plot_generation")
@@ -93,6 +96,8 @@ class PromptBuilder:
                 "plot_points": plot_points,
                 "emotional_tone": emotional_tone,
                 "previous_chapter_summary": ctx.previous_chapter_summary,
+                "volume_summary": ctx.volume_summary,
+                "act_summary": ctx.act_summary,
             }
             sections.append(plot_skill.render(plot_ctx))
         else:
@@ -130,6 +135,10 @@ class PromptBuilder:
                 sections.append(fs_skill.render(fs_ctx))
             else:
                 sections.append("## 伏笔约束\n" + "\n".join(ctx.foreshadowing_directives))
+
+        # === 6.5 分支剧情约束 ===
+        if ctx.branch_directives:
+            sections.append("## 分支剧情约束\n" + "\n".join(ctx.branch_directives))
 
         # === 7. 逻辑一致性约束 (Skill: logic_consistency) ===
         logic_skill = self._get_skill(bindings, "logic_consistency")
@@ -282,6 +291,15 @@ class PromptBuilder:
                     "description": "使用本章绑定的伏笔信息",
                 })
 
+        # === 6.5 分支剧情约束 ===
+        if ctx.branch_directives:
+            skills_used.append({
+                "type": "branch_plot",
+                "label": "分支剧情约束",
+                "name": "活跃分支推进",
+                "description": "提示 AI 在合理时机推进或呼应已开启的分支剧情",
+            })
+
         # === 7. 逻辑一致性约束 ===
         logic_skill = self._get_skill(bindings, "logic_consistency")
         if logic_skill:
@@ -368,12 +386,39 @@ class PromptBuilder:
             "人物行为必须基于其动机与已知信息，任何事件都不能违背基本常识与世界观设定。"
         )
 
-    def _default_world_section(self, world_summary: str) -> str:
-        return (
-            "## 世界观设定\n"
-            f"{world_summary}\n\n"
-            "写作时必须遵守以上世界观规则，不得出现与设定矛盾的内容。"
-        )
+    def _format_locations(self, locations) -> str:
+        """格式化地点列表"""
+        lines = []
+        for loc in locations:
+            status_label = {"active": "", "destroyed": "[已毁]", "hidden": "[秘]", "lost": "[失]", "under_construction": "[建]"}.get(loc.status.value, "")
+            hier = f" ({loc.hierarchy})" if loc.hierarchy else ""
+            scale = f" [{loc.scale}]" if loc.scale else ""
+            lines.append(f"- {status_label} {loc.name}{hier}{scale}: {loc.description}")
+        return "\n".join(lines)
+
+    def _format_factions(self, factions, locations_dict) -> str:
+        """格式化势力列表"""
+        lines = []
+        loc_map = {loc.id: loc.name for loc in locations_dict.values()} if locations_dict else {}
+        for fac in factions:
+            status_label = {"active": "", "dissolved": "[已散]", "hidden": "[秘]", "at_war": "[战]", "declining": "[衰]", "rising": "[兴]"}.get(fac.status.value, "")
+            loc_info = f" @ {loc_map.get(fac.location_id, '')}" if fac.location_id else ""
+            lines.append(f"- {status_label} {fac.name}{loc_info}: {fac.description}")
+        return "\n".join(lines)
+
+    def _default_world_section(self, world_summary: str, project) -> str:
+        parts = [
+            "## 世界观设定",
+            f"{world_summary}",
+        ]
+        if project.locations:
+            parts.append("\n### 关键地点")
+            parts.append(self._format_locations(project.locations.values()))
+        if project.factions:
+            parts.append("\n### 主要势力")
+            parts.append(self._format_factions(project.factions.values(), project.locations))
+        parts.append("\n写作时必须遵守以上世界观规则，不得出现与设定矛盾的内容。")
+        return "\n".join(parts)
 
     def _default_plot_section(
         self,
@@ -385,8 +430,15 @@ class PromptBuilder:
         parts = ["## 情节要求"]
         if ctx.outline_path:
             parts.append(f"当前位置: {' > '.join(ctx.outline_path)}")
+        # 卷摘要（轻度影响）
+        if ctx.volume_summary:
+            parts.append(f"\n【所属卷背景】{ctx.volume_summary}")
+        # 幕摘要（高度影响）
+        if ctx.act_summary:
+            parts.append(f"【当前幕要求 — 路线指导】{ctx.act_summary}")
+            parts.append("以上幕级要求对本次章节创作具有整体的路线指导意义，请在情节推进和氛围营造中严格体现。")
         if chapter_summary:
-            parts.append(f"本章摘要: {chapter_summary}")
+            parts.append(f"\n本章摘要: {chapter_summary}")
         if plot_points:
             parts.append("必须包含的情节点:")
             for line in plot_points.splitlines():
@@ -414,13 +466,18 @@ class PromptBuilder:
     def _format_characters(self, characters: List[Dict]) -> str:
         lines = []
         for c in characters:
-            lines.append(
+            entry = (
                 f"【{c.get('name', '未知')}】\n"
                 f"  身份: {c.get('role', '')}\n"
                 f"  性格: {c.get('personality', '')}\n"
                 f"  动机: {c.get('motivation', '')}\n"
                 f"  当前弧线: {c.get('current_arc', '')}"
             )
+            if c.get("artifacts"):
+                entry += f"\n  法宝: {c['artifacts']}"
+            if c.get("spells_skills"):
+                entry += f"\n  法术/技能: {c['spells_skills']}"
+            lines.append(entry)
         return "\n\n".join(lines)
 
     def _default_character_section(self, characters: List[Dict]) -> str:

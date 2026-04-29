@@ -18,7 +18,8 @@ from datetime import datetime
 from xsagent.core.models import (
     NovelProject, Character, WorldBuilding, OutlineNode,
     StyleGuide, CharacterRole, ChapterStatus, Foreshadowing,
-    ForeshadowingStatus, StyleReference
+    ForeshadowingStatus, StyleReference, BranchPlot, BranchStatus,
+    Location, LocationStatus, Faction, FactionStatus
 )
 from xsagent.storage.json_storage import JSONStorage
 from xsagent.skills.skill_registry import SkillRegistry
@@ -137,7 +138,7 @@ page = None
 if st.session_state.wizard_step == 0 and st.session_state.current_project_id:
     page = st.sidebar.radio(
         "导航",
-        ["项目概览", "世界观设定", "人物设定", "故事大纲", "伏笔设计", "风格设定", "章节创作", "导出小说"],
+        ["项目概览", "世界观设定", "地点管理", "势力管理", "人物设定", "故事大纲", "伏笔设计", "风格设定", "章节创作", "导出小说"],
     )
 
 # ========== 主内容区 ==========
@@ -264,7 +265,7 @@ if st.session_state.wizard_step > 0:
     # ===== Step 3: 故事大纲 =====
     elif step == 3:
         st.header("第三步：故事大纲")
-        st.info("大纲只需规划到「卷」级别，描述每卷的大体流程即可。具体章节可在后续创作中逐步添加。高级用户也可通过 JSON 导入含章的详细大纲。")
+        st.info("大纲分为「总纲-卷-幕-章」四级结构。此处只需规划到「卷」级别，描述每卷的大体流程即可。幕与章可在后续创作中逐步细化。高级用户也可通过 JSON 导入含幕/章的详细大纲。")
 
         tab_form, tab_json = st.tabs(["表单输入", "JSON导入"])
 
@@ -295,7 +296,7 @@ if st.session_state.wizard_step > 0:
                                 title=vol_title, level=1, summary=vol_summary
                             ))
                         outline = OutlineNode(
-                            title="全书大纲", level=1, summary="", children=children
+                            title="全书总纲", level=0, summary="", children=children
                         )
                         st.session_state.wizard_data["outline"] = outline.to_dict()
                         st.session_state.wizard_step = 4
@@ -314,6 +315,12 @@ if st.session_state.wizard_step > 0:
                         try:
                             data = json.loads(json_text)
                             outline = OutlineNode.from_dict(data)
+                            # 兼容旧数据：如果根节点 level != 0，自动包装为总纲
+                            if outline.level != 0:
+                                old_root = outline
+                                outline = OutlineNode(
+                                    title="全书总纲", level=0, summary="", children=[old_root]
+                                )
                             st.session_state.wizard_data["outline"] = outline.to_dict()
                             st.session_state.wizard_step = 4
                             st.rerun()
@@ -445,10 +452,8 @@ elif page == "世界观设定":
         with col2:
             society = st.text_area("社会结构 / 势力分布", value=world.society, height=100)
             rules_text = st.text_area("核心规则（每行一条）", value="\n".join(world.rules), height=100)
-            locations_text = st.text_area("关键地点（格式: 地名=描述，每行一个）", value="\n".join(f"{k}={v}" for k, v in world.locations.items()), height=100)
+            customs_text = st.text_area("风俗文化（每行一条）", value="\n".join(world.customs), height=100)
 
-        factions_text = st.text_area("势力/组织（格式: 名称=描述，每行一个）", value="\n".join(f"{k}={v}" for k, v in world.factions.items()), height=80)
-        customs_text = st.text_area("风俗文化（每行一条）", value="\n".join(world.customs), height=80)
         notes = st.text_area("世界观备忘笔记", value=world.notes, height=60)
         tags_text = st.text_input("标签（逗号分隔）", value=", ".join(world.tags), placeholder="修仙, 架空, 权谋...")
 
@@ -461,22 +466,183 @@ elif page == "世界观设定":
             world.power_system = power_system
             world.society = society
             world.rules = [r.strip() for r in rules_text.splitlines() if r.strip()]
-            world.locations = {}
-            for line in locations_text.splitlines():
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    world.locations[k.strip()] = v.strip()
-            world.factions = {}
-            for line in factions_text.splitlines():
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    world.factions[k.strip()] = v.strip()
             world.customs = [c.strip() for c in customs_text.splitlines() if c.strip()]
             world.notes = notes
             world.tags = [t.strip() for t in tags_text.split(",") if t.strip()]
             project.world = world
             save_project(project)
             st.success("世界观已保存")
+
+    st.divider()
+    st.info("💡 地点与势力已迁移至独立管理页面，请通过左侧导航「地点管理」和「势力管理」进行详细设定。")
+
+
+# ---------- 页面：地点管理 ----------
+elif page == "地点管理":
+    st.header("地点管理")
+
+    tab_list, tab_add = st.tabs(["地点列表", "添加地点"])
+
+    with tab_list:
+        if not project.locations:
+            st.info("暂无地点，请在「添加地点」中手动添加，或通过章节审校让AI自动识别。")
+        else:
+            # 按层级排序展示
+            for loc in sorted(project.locations.values(), key=lambda x: x.hierarchy or x.name):
+                with st.expander(f"📍 {loc.name} [{loc.status.value}]"):
+                    with st.form(f"edit_loc_form_{loc.id}"):
+                        lname = st.text_input("地点名称", value=loc.name, key=f"loc_name_{loc.id}")
+                        ldesc = st.text_area("描述", value=loc.description, height=60, key=f"loc_desc_{loc.id}")
+                        lstatus = st.selectbox(
+                            "状态",
+                            [LocationStatus.ACTIVE, LocationStatus.DESTROYED, LocationStatus.HIDDEN, LocationStatus.LOST, LocationStatus.UNDER_CONSTRUCTION],
+                            index=[LocationStatus.ACTIVE, LocationStatus.DESTROYED, LocationStatus.HIDDEN, LocationStatus.LOST, LocationStatus.UNDER_CONSTRUCTION].index(loc.status),
+                            format_func=lambda s: {"active": "正常", "destroyed": "已毁灭", "hidden": "隐藏", "lost": "失落", "under_construction": "建造中"}.get(s.value, s.value),
+                            key=f"loc_status_{loc.id}",
+                        )
+                        llevel = st.selectbox("级别", ["minor", "normal", "important", "core", "sacred"], index=["minor", "normal", "important", "core", "sacred"].index(loc.level) if loc.level in ["minor", "normal", "important", "core", "sacred"] else 1, key=f"loc_level_{loc.id}")
+                        lscale = st.text_input("规模", value=loc.scale, key=f"loc_scale_{loc.id}")
+                        lhierarchy = st.text_input("层级位置", value=loc.hierarchy, placeholder="如: 东方大陆 > 青云国 > 京城", key=f"loc_hier_{loc.id}")
+                        # 父地点选择
+                        parent_options = {"": "（无）"}
+                        for pid, ploc in project.locations.items():
+                            if pid != loc.id:
+                                parent_options[pid] = ploc.name
+                        lparent = st.selectbox(
+                            "上级地点",
+                            options=list(parent_options.keys()),
+                            index=list(parent_options.keys()).index(loc.parent_location_id) if loc.parent_location_id in parent_options else 0,
+                            format_func=lambda x: parent_options[x],
+                            key=f"loc_parent_{loc.id}",
+                        )
+                        lnotes = st.text_area("备忘", value=loc.notes, height=40, key=f"loc_notes_{loc.id}")
+
+                        if st.form_submit_button("保存修改"):
+                            loc.name = lname
+                            loc.description = ldesc
+                            loc.status = lstatus
+                            loc.level = llevel
+                            loc.scale = lscale
+                            loc.hierarchy = lhierarchy
+                            loc.parent_location_id = lparent if lparent else None
+                            loc.notes = lnotes
+                            save_project(project)
+                            st.success(f"地点 {lname} 已更新")
+                            st.rerun()
+
+                    if st.button("删除地点", key=f"del_loc_{loc.id}", type="secondary"):
+                        del project.locations[loc.id]
+                        save_project(project)
+                        st.success(f"地点 {loc.name} 已删除")
+                        st.rerun()
+
+    with tab_add:
+        with st.form("add_location"):
+            lname = st.text_input("地点名称 *")
+            ldesc = st.text_area("描述")
+            lstatus = st.selectbox("状态", [LocationStatus.ACTIVE, LocationStatus.DESTROYED, LocationStatus.HIDDEN, LocationStatus.LOST, LocationStatus.UNDER_CONSTRUCTION], format_func=lambda s: {"active": "正常", "destroyed": "已毁灭", "hidden": "隐藏", "lost": "失落", "under_construction": "建造中"}.get(s.value, s.value))
+            llevel = st.selectbox("级别", ["minor", "normal", "important", "core", "sacred"])
+            lscale = st.text_input("规模", placeholder="如: 中型城市 / 大型宗门")
+            lhierarchy = st.text_input("层级位置", placeholder="如: 东方大陆 > 青云国 > 京城")
+            lnotes = st.text_area("备忘", height=40)
+            if st.form_submit_button("添加") and lname:
+                loc = Location(
+                    name=lname, description=ldesc, status=lstatus,
+                    level=llevel, scale=lscale, hierarchy=lhierarchy, notes=lnotes,
+                )
+                project.locations[loc.id] = loc
+                save_project(project)
+                st.success(f"地点 {lname} 已添加")
+                st.rerun()
+
+
+# ---------- 页面：势力管理 ----------
+elif page == "势力管理":
+    st.header("势力管理")
+
+    tab_list, tab_add = st.tabs(["势力列表", "添加势力"])
+
+    with tab_list:
+        if not project.factions:
+            st.info("暂无势力，请在「添加势力」中手动添加，或通过章节审校让AI自动识别。")
+        else:
+            for fac in sorted(project.factions.values(), key=lambda x: x.name):
+                loc_name = project.locations[fac.location_id].name if fac.location_id and fac.location_id in project.locations else "未绑定地点"
+                with st.expander(f"🏛️ {fac.name} [{fac.status.value}] — 📍 {loc_name}"):
+                    with st.form(f"edit_fac_form_{fac.id}"):
+                        fname = st.text_input("势力名称", value=fac.name, key=f"fac_name_{fac.id}")
+                        fdesc = st.text_area("描述", value=fac.description, height=60, key=f"fac_desc_{fac.id}")
+                        fstatus = st.selectbox(
+                            "状态",
+                            [FactionStatus.ACTIVE, FactionStatus.DISSOLVED, FactionStatus.HIDDEN, FactionStatus.AT_WAR, FactionStatus.DECLINING, FactionStatus.RISING],
+                            index=[FactionStatus.ACTIVE, FactionStatus.DISSOLVED, FactionStatus.HIDDEN, FactionStatus.AT_WAR, FactionStatus.DECLINING, FactionStatus.RISING].index(fac.status),
+                            format_func=lambda s: {"active": "活跃", "dissolved": "已解散", "hidden": "隐秘", "at_war": "交战中", "declining": "衰落中", "rising": "崛起中"}.get(s.value, s.value),
+                            key=f"fac_status_{fac.id}",
+                        )
+                        flevel = st.selectbox("级别", ["minor", "normal", "important", "major", "supreme"], index=["minor", "normal", "important", "major", "supreme"].index(fac.level) if fac.level in ["minor", "normal", "important", "major", "supreme"] else 1, key=f"fac_level_{fac.id}")
+                        # 绑定地点
+                        loc_options = {"": "（无）"}
+                        for lid, lloc in project.locations.items():
+                            loc_options[lid] = lloc.name
+                        floc_id = st.selectbox(
+                            "绑定地点",
+                            options=list(loc_options.keys()),
+                            index=list(loc_options.keys()).index(fac.location_id) if fac.location_id in loc_options else 0,
+                            format_func=lambda x: loc_options[x],
+                            key=f"fac_loc_{fac.id}",
+                        )
+                        # 首领人物
+                        char_options = {"": "（无）"}
+                        for cid, cchar in project.characters.items():
+                            char_options[cid] = cchar.name
+                        fleader_id = st.selectbox(
+                            "首领",
+                            options=list(char_options.keys()),
+                            index=list(char_options.keys()).index(fac.leader_character_id) if fac.leader_character_id in char_options else 0,
+                            format_func=lambda x: char_options[x],
+                            key=f"fac_leader_{fac.id}",
+                        )
+                        fnotes = st.text_area("备忘", value=fac.notes, height=40, key=f"fac_notes_{fac.id}")
+
+                        if st.form_submit_button("保存修改"):
+                            fac.name = fname
+                            fac.description = fdesc
+                            fac.status = fstatus
+                            fac.level = flevel
+                            fac.location_id = floc_id if floc_id else None
+                            fac.leader_character_id = fleader_id if fleader_id else None
+                            fac.notes = fnotes
+                            save_project(project)
+                            st.success(f"势力 {fname} 已更新")
+                            st.rerun()
+
+                    if st.button("删除势力", key=f"del_fac_{fac.id}", type="secondary"):
+                        del project.factions[fac.id]
+                        save_project(project)
+                        st.success(f"势力 {fac.name} 已删除")
+                        st.rerun()
+
+    with tab_add:
+        with st.form("add_faction"):
+            fname = st.text_input("势力名称 *")
+            fdesc = st.text_area("描述")
+            fstatus = st.selectbox("状态", [FactionStatus.ACTIVE, FactionStatus.DISSOLVED, FactionStatus.HIDDEN, FactionStatus.AT_WAR, FactionStatus.DECLINING, FactionStatus.RISING], format_func=lambda s: {"active": "活跃", "dissolved": "已解散", "hidden": "隐秘", "at_war": "交战中", "declining": "衰落中", "rising": "崛起中"}.get(s.value, s.value))
+            flevel = st.selectbox("级别", ["minor", "normal", "important", "major", "supreme"])
+            # 绑定地点
+            loc_options = {"": "（无）"}
+            for lid, lloc in project.locations.items():
+                loc_options[lid] = lloc.name
+            floc_id = st.selectbox("绑定地点", options=list(loc_options.keys()), format_func=lambda x: loc_options[x])
+            fnotes = st.text_area("备忘", height=40)
+            if st.form_submit_button("添加") and fname:
+                fac = Faction(
+                    name=fname, description=fdesc, status=fstatus,
+                    level=flevel, location_id=floc_id if floc_id else None, notes=fnotes,
+                )
+                project.factions[fac.id] = fac
+                save_project(project)
+                st.success(f"势力 {fname} 已添加")
+                st.rerun()
 
 
 # ---------- 页面：人物设定 ----------
@@ -488,7 +654,8 @@ elif page == "人物设定":
         if not project.characters:
             st.info("暂无人物")
         for char in project.characters.values():
-            with st.expander(f"【{char.name}】{char.role.value}"):
+            fac_name = project.factions[char.faction_id].name if char.faction_id and char.faction_id in project.factions else ""
+            with st.expander(f"【{char.name}】{char.role.value}" + (f" — 🏛️ {fac_name}" if fac_name else "")):
                 with st.form(f"edit_char_form_{char.id}"):
                     cname = st.text_input("姓名", value=char.name, key=f"char_name_{char.id}")
                     calias = st.text_input("别名/称号（逗号分隔）", value=", ".join(char.alias), key=f"char_alias_{char.id}")
@@ -498,17 +665,31 @@ elif page == "人物设定":
                         index=[r.value for r in CharacterRole].index(char.role.value),
                         key=f"char_role_{char.id}",
                     )
+                    # 势力绑定
+                    fac_options = {"": "（无）"}
+                    for fid, fac in project.factions.items():
+                        fac_options[fid] = fac.name
+                    cfaction_id = st.selectbox(
+                        "核心绑定势力",
+                        options=list(fac_options.keys()),
+                        index=list(fac_options.keys()).index(char.faction_id) if char.faction_id in fac_options else 0,
+                        format_func=lambda x: fac_options[x],
+                        key=f"char_faction_{char.id}",
+                    )
+                    cfaction_notes = st.text_input("势力关系描述", value=char.faction_notes, placeholder="如: 核心成员 / 外围弟子 / 敌对", key=f"char_faction_notes_{char.id}")
                     col1, col2 = st.columns(2)
                     with col1:
                         cage = st.number_input("年龄", value=char.age or 0, min_value=0, key=f"char_age_{char.id}")
                         cappearance = st.text_area("外貌描写", value=char.appearance, height=80, key=f"char_appearance_{char.id}")
                         cpersonality = st.text_area("性格特征", value=char.personality, height=80, key=f"char_personality_{char.id}")
                         cmotivation = st.text_area("核心动机", value=char.motivation, height=80, key=f"char_motivation_{char.id}")
+                        cartifacts = st.text_area("法宝", value=char.artifacts, height=80, key=f"char_artifacts_{char.id}")
                     with col2:
                         cgender = st.text_input("性别", value=char.gender or "", key=f"char_gender_{char.id}")
                         cbackground = st.text_area("身世背景", value=char.background, height=80, key=f"char_background_{char.id}")
                         carc = st.text_area("人物弧线", value=char.arc, height=80, key=f"char_arc_{char.id}")
                         cnotes = st.text_area("备忘笔记", value=char.notes, height=80, key=f"char_notes_{char.id}")
+                        cspells_skills = st.text_area("法术/技能", value=char.spells_skills, height=80, key=f"char_spells_skills_{char.id}")
                     cabilities = st.text_input("能力/技能（逗号分隔）", value=", ".join(char.abilities), key=f"char_abilities_{char.id}")
                     crels = st.text_input("关系网（格式: 角色名=关系，逗号分隔）", value=", ".join(f"{k}={v}" for k, v in char.relationships.items()), key=f"char_rels_{char.id}")
                     ctags = st.text_input("标签（逗号分隔）", value=", ".join(char.tags), key=f"char_tags_{char.id}")
@@ -517,6 +698,8 @@ elif page == "人物设定":
                         char.name = cname
                         char.alias = [a.strip() for a in calias.split(",") if a.strip()]
                         char.role = CharacterRole(crole)
+                        char.faction_id = cfaction_id if cfaction_id else None
+                        char.faction_notes = cfaction_notes
                         char.age = cage if cage > 0 else None
                         char.gender = cgender or None
                         char.appearance = cappearance
@@ -524,6 +707,8 @@ elif page == "人物设定":
                         char.background = cbackground
                         char.motivation = cmotivation
                         char.arc = carc
+                        char.artifacts = cartifacts
+                        char.spells_skills = cspells_skills
                         char.abilities = [a.strip() for a in cabilities.split(",") if a.strip()]
                         char.notes = cnotes
                         char.tags = [t.strip() for t in ctags.split(",") if t.strip()]
@@ -549,16 +734,29 @@ elif page == "人物设定":
         with st.form("add_character"):
             cname = st.text_input("姓名")
             crole = st.selectbox("角色定位", options=[r.value for r in CharacterRole])
+            # 势力绑定
+            fac_options = {"": "（无）"}
+            for fid, fac in project.factions.items():
+                fac_options[fid] = fac.name
+            cfaction_id = st.selectbox("核心绑定势力", options=list(fac_options.keys()), format_func=lambda x: fac_options[x])
+            cfaction_notes = st.text_input("势力关系描述", placeholder="如: 核心成员 / 外围弟子")
             cpersonality = st.text_area("性格特征")
             cmotivation = st.text_area("核心动机")
             cbackground = st.text_area("身世背景")
             carc = st.text_area("人物弧线")
+            cartifacts = st.text_area("法宝")
+            cspells_skills = st.text_area("法术/技能")
             if st.form_submit_button("添加") and cname:
-                pipeline.add_character(
+                char = pipeline.add_character(
                     project, name=cname, role=CharacterRole(crole),
                     personality=cpersonality, motivation=cmotivation,
                     background=cbackground, arc=carc,
+                    artifacts=cartifacts, spells_skills=cspells_skills,
                 )
+                if cfaction_id:
+                    char.faction_id = cfaction_id
+                    char.faction_notes = cfaction_notes
+                    save_project(project)
                 st.success(f"人物 {cname} 已添加")
                 st.rerun()
 
@@ -571,7 +769,8 @@ elif page == "故事大纲":
 
     # ===== 辅助函数：扁平化大纲节点 =====
     def flatten_outline(node, depth=0):
-        result = [(node.id, "　" * depth + f"【{node.title}】", node)]
+        level_name = {0: "总纲", 1: "卷", 2: "幕", 3: "章"}.get(node.level, "")
+        result = [(node.id, "　" * depth + f"[{level_name}] {node.title}", node)]
         for child in node.children:
             result.extend(flatten_outline(child, depth + 1))
         return result
@@ -582,7 +781,8 @@ elif page == "故事大纲":
             st.subheader("当前大纲")
             def render_node(node, depth=0):
                 indent = "　" * depth
-                st.write(f"{indent}**{node.title}** — {node.summary[:50]}...")
+                level_name = {0: "总纲", 1: "卷", 2: "幕", 3: "章"}.get(node.level, "")
+                st.write(f"{indent}**[{level_name}] {node.title}** — {node.summary[:50]}...")
                 for child in node.children:
                     render_node(child, depth + 1)
             render_node(project.outline)
@@ -601,30 +801,53 @@ elif page == "故事大纲":
 
             # 修改节点
             with st.form("edit_node_form"):
-                edit_title = st.text_input("标题", value=selected_node.title, key="edit_title")
-                edit_summary = st.text_area("摘要", value=selected_node.summary, height=80, key="edit_summary")
+                level_name = {0: "总纲", 1: "卷", 2: "幕", 3: "章"}.get(selected_node.level, "未知")
+                st.caption(f"当前级别: {level_name}")
+                edit_title = st.text_input("标题", value=selected_node.title, key=f"edit_title_{selected_node_id}")
+                edit_summary = st.text_area("摘要", value=selected_node.summary, height=80, key=f"edit_summary_{selected_node_id}")
                 if st.form_submit_button("保存修改"):
                     pipeline.update_outline_node(project, selected_node_id, title=edit_title, summary=edit_summary)
                     st.success("节点已更新")
                     st.rerun()
 
             # 添加子节点
-            with st.form("add_child_form"):
-                child_title = st.text_input("子节点标题", key="child_title")
-                child_summary = st.text_area("子节点摘要", height=60, key="child_summary")
-                child_level = st.selectbox(
-                    "层级",
-                    [1, 2, 3],
-                    format_func=lambda x: {1: "1-卷", 2: "2-幕", 3: "3-章"}[x],
-                    key="child_level",
-                )
-                if st.form_submit_button("添加子节点") and child_title.strip():
-                    pipeline.add_outline_node(
-                        project, parent_id=selected_node_id,
-                        title=child_title.strip(), summary=child_summary, level=child_level,
+            if selected_node.level >= 3:
+                st.caption("章节点下不能再添加子节点")
+            else:
+                with st.form("add_child_form"):
+                    child_title = st.text_input("子节点标题", key=f"child_title_{selected_node_id}")
+                    child_summary = st.text_area("子节点摘要", height=60, key=f"child_summary_{selected_node_id}")
+                    # 递进式级别选择：允许添加当前级别+1到3的任意级别
+                    available_levels = list(range(selected_node.level + 1, 4))
+                    level_labels = {1: "卷", 2: "幕", 3: "章"}
+                    child_level = st.selectbox(
+                        "添加级别",
+                        available_levels,
+                        format_func=lambda x: level_labels.get(x, "未知"),
+                        index=0,
+                        key=f"child_level_{selected_node_id}",
                     )
-                    st.success("子节点已添加")
-                    st.rerun()
+                    # 当添加章时，显示序号输入
+                    child_seq = None
+                    if child_level == 3:
+                        next_seq = max((c.sequence_number for c in project.chapters.values()), default=0) + 1
+                        child_seq = st.number_input("章节序号", min_value=1, value=next_seq, step=1, key=f"child_seq_{selected_node_id}")
+                    parent_level_label = {0: "总纲", 1: "卷", 2: "幕", 3: "章"}.get(selected_node.level, "")
+                    child_level_label = level_labels.get(child_level, "未知")
+                    st.info(f"将在「{selected_node.title}」({parent_level_label}) 下添加 **{child_level_label}**")
+                    if st.form_submit_button("添加子节点") and child_title.strip():
+                        node = pipeline.add_outline_node(
+                            project, parent_id=selected_node_id,
+                            title=child_title.strip(), summary=child_summary, level=child_level,
+                        )
+                        # 如果是章且指定了序号，同步更新章节序号
+                        if child_level == 3 and node.chapter_id and child_seq is not None:
+                            ch = project.chapters.get(node.chapter_id)
+                            if ch:
+                                ch.sequence_number = int(child_seq)
+                                save_project(project)
+                        st.success("子节点已添加")
+                        st.rerun()
 
             # 删除节点
             if selected_node_id != project.outline.id:
@@ -638,20 +861,7 @@ elif page == "故事大纲":
             st.info("尚未导入大纲，可在「导入/覆盖」标签页导入，或在大纲创建后在此编辑。")
 
         st.divider()
-        st.subheader("章节管理")
-        with st.form("add_chapter_form"):
-            col_title, col_seq = st.columns([3, 1])
-            with col_title:
-                new_ch_title = st.text_input("章节标题", placeholder="如：第三章")
-            with col_seq:
-                next_seq = max((c.sequence_number for c in project.chapters.values()), default=0) + 1
-                new_ch_seq = st.number_input("序号", min_value=1, value=next_seq, step=1)
-            new_ch_summary = st.text_area("章节摘要", height=60)
-            if st.form_submit_button("添加章节") and new_ch_title.strip():
-                pipeline.add_chapter(project, title=new_ch_title.strip(), outline_summary=new_ch_summary, sequence_number=int(new_ch_seq))
-                st.success(f"章节 {new_ch_title} 已添加")
-                st.rerun()
-
+        st.subheader("章节列表")
         if project.chapters:
             st.write("已有章节:")
             for ch_item in sorted(project.chapters.values(), key=lambda c: c.sequence_number):
@@ -677,24 +887,38 @@ elif page == "故事大纲":
                                 st.success("章节已删除")
                                 st.rerun()
         else:
-            st.info("暂无章节，可通过上方表单手动添加，或导入含章的详细大纲。")
+            st.info("暂无章节，请在大纲编辑中通过「添加子节点」添加章级别节点，或导入含章的详细大纲。")
 
     # ===== Tab 2: 导入/覆盖 =====
     with tab_import:
         st.info("上传 JSON 文件将完全覆盖现有大纲。如需保留当前大纲，请先导出备份。")
         with st.expander("查看 JSON 格式示例"):
             st.code(json.dumps({
-                "title": "第一卷：暗流",
-                "level": 1,
-                "summary": "卷摘要",
+                "title": "全书总纲",
+                "level": 0,
+                "summary": "总纲摘要",
                 "children": [
                     {
-                        "title": "第一章：开端",
-                        "level": 3,
-                        "summary": "章节摘要",
-                        "plot_points": ["情节点1", "情节点2"],
-                        "characters_involved": [],
-                        "emotional_tone": "紧张"
+                        "title": "第一卷：暗流",
+                        "level": 1,
+                        "summary": "卷摘要",
+                        "children": [
+                            {
+                                "title": "第一幕：开端",
+                                "level": 2,
+                                "summary": "幕摘要",
+                                "children": [
+                                    {
+                                        "title": "第一章：开端",
+                                        "level": 3,
+                                        "summary": "章节摘要",
+                                        "plot_points": ["情节点1", "情节点2"],
+                                        "characters_involved": [],
+                                        "emotional_tone": "紧张"
+                                    }
+                                ]
+                            }
+                        ]
                     }
                 ]
             }, ensure_ascii=False, indent=2), language="json")
@@ -893,6 +1117,70 @@ elif page == "章节创作":
 
     ch = selected_chapter
 
+    # ========== 幕选择（上下文定位）==========
+    def _collect_acts(node: OutlineNode) -> list:
+        """递归收集所有幕节点（level=2）"""
+        acts = []
+        if node.level == 2:
+            acts.append(node)
+        for child in node.children:
+            acts.extend(_collect_acts(child))
+        return acts
+
+    selected_act = None
+    selected_volume_summary = ""
+    selected_act_summary = ""
+    default_act_id = None
+    is_manual_override = False
+
+    if project.outline:
+        all_acts = _collect_acts(project.outline)
+        if all_acts:
+            # 查找当前章节默认关联的幕
+            if ch.id:
+                for chapter_node in project.outline.flatten_chapters():
+                    if chapter_node.chapter_id == ch.id:
+                        path_nodes = project._trace_outline_path_nodes(chapter_node)
+                        for pn in path_nodes:
+                            if pn.level == 2:
+                                default_act_id = pn.id
+                                break
+                        break
+
+            act_options = {act.id: act.title for act in all_acts}
+            default_index = 0
+            if default_act_id and default_act_id in act_options:
+                default_index = list(act_options.keys()).index(default_act_id)
+
+            selected_act_id = st.selectbox(
+                "选择幕（上下文）",
+                options=list(act_options.keys()),
+                index=default_index,
+                format_func=lambda x: act_options[x],
+                key=f"chapter_act_select_{ch.id}",
+            )
+
+            # 判断是否用户手动覆盖了默认关联
+            is_manual_override = (default_act_id is not None and selected_act_id != default_act_id) or (default_act_id is None)
+
+            selected_act = next((a for a in all_acts if a.id == selected_act_id), None)
+            if selected_act:
+                selected_act_summary = selected_act.summary
+                # 查找所属卷摘要
+                path_nodes = project._trace_outline_path_nodes(selected_act)
+                for pn in path_nodes:
+                    if pn.level == 1:
+                        selected_volume_summary = pn.summary
+                        break
+
+                col_act, col_vol = st.columns(2)
+                with col_act:
+                    st.markdown("**📜 幕摘要**（高影响力）")
+                    st.info(selected_act_summary or "暂无摘要")
+                with col_vol:
+                    st.markdown("**📖 卷摘要**（参考影响）")
+                    st.info(selected_volume_summary or "暂无摘要")
+
     st.divider()
 
     # 三栏布局：情节流程 | 伏笔绑定 | 生成与预览
@@ -996,6 +1284,70 @@ elif page == "章节创作":
         if project.style.mimicry_mode:
             st.write(f"✨ 模仿: {project.style.reference_author}")
 
+        # ========== 分支剧情管理 ==========
+        st.subheader("🌿 分支剧情")
+
+        # 手动添加分支
+        with st.expander("➕ 手动添加分支", expanded=False):
+            with st.form("add_branch_form"):
+                branch_title = st.text_input("分支名称")
+                branch_desc = st.text_area("分支描述/触发事件")
+                branch_importance = st.selectbox("重要性", ["minor", "medium", "major"], index=1)
+                if st.form_submit_button("添加") and branch_title:
+                    new_branch = BranchPlot(
+                        title=branch_title,
+                        description=branch_desc,
+                        importance=branch_importance,
+                        origin_chapter_id=ch.id,
+                        status=BranchStatus.OPEN,
+                    )
+                    project.branch_plots[new_branch.id] = new_branch
+                    save_project(project)
+                    st.success(f"已添加分支: {branch_title}")
+                    st.rerun()
+
+        # 展示活跃分支
+        active_branches = [
+            b for b in project.branch_plots.values()
+            if b.status in (BranchStatus.OPEN, BranchStatus.IN_PROGRESS)
+        ]
+        if active_branches:
+            st.caption(f"当前活跃分支: {len(active_branches)} 个")
+            for branch in active_branches:
+                with st.container(border=True):
+                    st.markdown(f"**{branch.title}** `[{branch.importance}]`")
+                    st.caption(branch.description or "暂无描述")
+                    # 状态选择
+                    new_status = st.selectbox(
+                        "状态",
+                        [BranchStatus.OPEN, BranchStatus.IN_PROGRESS, BranchStatus.RESOLVED, BranchStatus.ABANDONED],
+                        index=[BranchStatus.OPEN, BranchStatus.IN_PROGRESS, BranchStatus.RESOLVED, BranchStatus.ABANDONED].index(branch.status),
+                        format_func=lambda s: {"open": "🟡 待推进", "in_progress": "🟢 推进中", "resolved": "✅ 已收束", "abandoned": "⚪ 已废弃"}.get(s.value, s.value),
+                        key=f"branch_status_{branch.id}_{ch.id}",
+                    )
+                    if new_status != branch.status:
+                        branch.status = new_status
+                        branch.updated_at = datetime.now().isoformat()
+                        save_project(project)
+                        st.rerun()
+                    # 标记本章是否推进了该分支
+                    is_progressed = ch.id in branch.progress_chapter_ids
+                    if st.checkbox("本章推进了该分支", value=is_progressed, key=f"branch_prog_{branch.id}_{ch.id}"):
+                        if ch.id not in branch.progress_chapter_ids:
+                            branch.progress_chapter_ids.append(ch.id)
+                            branch.status = BranchStatus.IN_PROGRESS
+                            branch.updated_at = datetime.now().isoformat()
+                            save_project(project)
+                            st.rerun()
+                    else:
+                        if ch.id in branch.progress_chapter_ids:
+                            branch.progress_chapter_ids.remove(ch.id)
+                            branch.updated_at = datetime.now().isoformat()
+                            save_project(project)
+                            st.rerun()
+        else:
+            st.info("暂无活跃分支。AI 审校时自动识别，或手动添加。")
+
     with col_right:
         st.subheader("🤖 内容生成")
         if not pipeline.generator:
@@ -1020,6 +1372,17 @@ elif page == "章节创作":
                     st.session_state._gen_buffer += chunk
                     placeholder.markdown(st.session_state._gen_buffer)
 
+                # 如果用户手动切换了幕，将选定幕/卷摘要作为额外约束
+                extra_constraints = []
+                if is_manual_override and selected_act_summary:
+                    extra_constraints.append(
+                        f"【当前幕要求 — 重要指导（用户指定）】{selected_act_summary}"
+                    )
+                if is_manual_override and selected_volume_summary:
+                    extra_constraints.append(
+                        f"【所属卷背景（用户指定）】{selected_volume_summary}"
+                    )
+
                 with st.spinner("生成中..."):
                     try:
                         pipeline.generate_chapter(
@@ -1027,6 +1390,7 @@ elif page == "章节创作":
                             temperature=temperature,
                             max_tokens=max_tokens,
                             stream_callback=on_chunk,
+                            extra_constraints=extra_constraints if extra_constraints else None,
                         )
                         st.session_state.generation_text = st.session_state._gen_buffer
                     except Exception as e:
@@ -1048,7 +1412,7 @@ elif page == "章节创作":
             save_project(project)
             st.success(f"已保存，{ch.word_count} 字")
         if save_cols[1].button("审校通过", use_container_width=True):
-            # 先AI分析章节内容，提取剧情记忆、新人物、新地点
+            # 先AI分析章节内容，提取剧情记忆、新人物、新地点、新势力、分支剧情
             with st.spinner("正在分析章节内容..."):
                 try:
                     analysis = pipeline.analyze_chapter(project, ch.id)
@@ -1059,7 +1423,13 @@ elif page == "章节创作":
                     if summary["new_chars_added"] > 0:
                         st.info(f"👤 自动发现 {summary['new_chars_added']} 个新人物，已添加到人物设定")
                     if summary["new_locs_added"] > 0:
-                        st.info(f"📍 自动发现 {summary['new_locs_added']} 个新地点，已添加到世界观")
+                        st.info(f"📍 自动发现 {summary['new_locs_added']} 个新地点，已添加到地点管理")
+                    if summary.get("new_factions_added", 0) > 0:
+                        st.info(f"🏛️ 自动发现 {summary['new_factions_added']} 个新势力，已添加到势力管理")
+                    if summary.get("faction_bindings", 0) > 0:
+                        st.info(f"🔗 自动绑定 {summary['faction_bindings']} 个人物势力关系")
+                    if summary.get("new_branches_added", 0) > 0:
+                        st.info(f"🌿 自动发现 {summary['new_branches_added']} 个新分支剧情，已添加到分支列表")
                 except Exception as e:
                     st.warning(f"章节分析失败（不影响审校）: {e}")
 
