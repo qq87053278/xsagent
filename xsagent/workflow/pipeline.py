@@ -808,6 +808,211 @@ class CreationPipeline:
         self.storage.save(project)
         return summary
 
+    def auto_generate_outline(
+        self,
+        project: NovelProject,
+        num_volumes: int = 3,
+        min_acts_per_volume: int = 5,
+        min_chapters_per_act: int = 5,
+        extra_guidance: str = "",
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> OutlineNode:
+        """
+        全自动生成 总纲-卷-幕-章 四级大纲。
+        基于项目的世界观设定、人物设定、描述等信息，
+        让 AI 一次性生成完整的故事大纲结构。
+
+        约束：
+        - 每卷至少 min_acts_per_volume 幕
+        - 每幕至少 min_chapters_per_act 章
+        """
+        if not self.generator:
+            raise RuntimeError("未配置 AI 生成器，请先设置 generator")
+
+        # 收集世界观信息
+        world_info = "未设定世界观"
+        if project.world:
+            w = project.world
+            parts = []
+            if w.name:
+                parts.append(f"世界名称: {w.name}")
+            if w.genre:
+                parts.append(f"题材类型: {w.genre}")
+            if w.era:
+                parts.append(f"时代背景: {w.era}")
+            if w.geography:
+                parts.append(f"地理设定: {w.geography}")
+            if w.history:
+                parts.append(f"历史沿革: {w.history}")
+            if w.power_system:
+                parts.append(f"力量体系: {w.power_system}")
+            if w.society:
+                parts.append(f"社会结构: {w.society}")
+            if w.rules:
+                parts.append(f"核心规则: {'; '.join(w.rules)}")
+            if w.customs:
+                parts.append(f"风俗文化: {'; '.join(w.customs)}")
+            world_info = "\n".join(parts)
+
+        # 收集人物信息
+        char_info = "暂无人物设定"
+        if project.characters:
+            char_lines = []
+            for c in project.characters.values():
+                line = f"- {c.name}（{c.role.value}）: {c.personality}"
+                if c.motivation:
+                    line += f"，动机: {c.motivation}"
+                char_lines.append(line)
+            char_info = "\n".join(char_lines)
+
+        # 收集地点信息
+        loc_info = ""
+        if project.locations:
+            loc_lines = [f"- {loc.name}: {loc.description}" for loc in project.locations.values()]
+            loc_info = "\n关键地点:\n" + "\n".join(loc_lines)
+
+        # 收集势力信息
+        fac_info = ""
+        if project.factions:
+            fac_lines = [f"- {fac.name}: {fac.description}" for fac in project.factions.values()]
+            fac_info = "\n主要势力:\n" + "\n".join(fac_lines)
+
+        prompt = f"""你是一位资深的小说策划编辑，擅长构建宏大叙事结构。
+请根据以下小说设定，生成一部完整的故事大纲。
+
+## 小说信息
+- 标题: {project.title}
+- 简介: {project.description or '暂无'}
+
+## 世界观设定
+{world_info}
+{loc_info}
+{fac_info}
+
+## 人物设定
+{char_info}
+
+## 结构要求
+大纲必须严格遵守「总纲-卷-幕-章」四级结构：
+1. 总纲（level=0）: 1个，包含全书的核心主线概述
+2. 卷（level=1）: 恰好 {num_volumes} 卷，每卷有独立的主题和阶段性目标
+3. 幕（level=2）: 每卷至少 {min_acts_per_volume} 幕，幕是卷内的叙事段落
+4. 章（level=3）: 每幕至少 {min_chapters_per_act} 章，每章有具体的情节内容
+
+## 内容要求
+1. 总纲 summary: 概括全书主线、核心冲突与最终走向（200字以内）
+2. 卷 summary: 概括本卷的阶段目标、主要冲突和关键转折（150字以内）
+3. 幕 summary: 描述本幕的叙事功能（如开端、递进、高潮、收束），以及具体要完成的剧情任务（100字以内）
+4. 章 summary: 具体描述本章要发生什么事件、哪些人物参与、情感走向（80字以内）
+5. 章 emotional_tone: 每章标注情感基调（如：紧张、悲壮、温馨、压抑等）
+6. 故事必须有完整的起承转合，伏笔要有回收，冲突要有解决
+7. 每卷之间有递进关系，难度和冲突逐步升级
+{f'8. 额外指导: {extra_guidance}' if extra_guidance else ''}
+
+## 输出格式
+严格按以下 JSON 格式输出，不要任何额外解释或 markdown 代码块标记：
+{{
+  "title": "全书总纲",
+  "level": 0,
+  "summary": "全书主线概述",
+  "children": [
+    {{
+      "title": "第一卷：卷名",
+      "level": 1,
+      "summary": "卷摘要",
+      "children": [
+        {{
+          "title": "第一幕：幕名",
+          "level": 2,
+          "summary": "幕摘要",
+          "children": [
+            {{
+              "title": "第一章 章名",
+              "level": 3,
+              "summary": "章节摘要",
+              "emotional_tone": "情感基调"
+            }}
+          ]
+        }}
+      ]
+    }}
+  ]
+}}"""
+
+        request = create_request(
+            prompt=prompt,
+            system_message="你是一位专业的小说大纲策划师。请严格按JSON格式输出完整的四级大纲结构。",
+            temperature=0.8,
+            max_tokens=16000,
+        )
+
+        # 执行生成
+        if stream_callback:
+            full_text = ""
+            for chunk in self.generator.generate_stream(request):
+                full_text += chunk
+                stream_callback(chunk)
+            result_text = full_text
+        else:
+            result = self.generator.generate(request)
+            if not result.success:
+                raise RuntimeError(f"大纲生成失败: {result.error_message}")
+            result_text = result.text
+
+        # 解析 JSON
+        text = result_text.strip()
+        # 去除可能的 markdown 代码块标记
+        if text.startswith("```"):
+            text = text.strip("`").strip()
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+        if text.endswith("```"):
+            text = text[:-3].strip()
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            # 尝试截取第一个完整的JSON对象
+            import re
+            match = re.search(r'\{', text)
+            if match:
+                brace_count = 0
+                start = match.start()
+                for i in range(start, len(text)):
+                    if text[i] == '{':
+                        brace_count += 1
+                    elif text[i] == '}':
+                        brace_count -= 1
+                    if brace_count == 0:
+                        try:
+                            data = json.loads(text[start:i+1])
+                            break
+                        except json.JSONDecodeError:
+                            continue
+                else:
+                    raise RuntimeError(f"AI 返回的大纲 JSON 解析失败: {e}\n原始文本前500字: {text[:500]}")
+            else:
+                raise RuntimeError(f"AI 返回的大纲 JSON 解析失败: {e}\n原始文本前500字: {text[:500]}")
+
+        outline = OutlineNode.from_dict(data)
+
+        # 兼容：如果根节点 level != 0，自动包装
+        if outline.level != 0:
+            outline = OutlineNode(
+                title="全书总纲", level=0, summary="", children=[outline]
+            )
+
+        # 验证结构完整性
+        volumes = [c for c in outline.children if c.level == 1]
+        if len(volumes) < num_volumes:
+            pass  # 允许AI返回略少的卷数，不强制报错
+
+        # 设置大纲到项目（会自动同步章节）
+        pipeline_self = self
+        pipeline_self.set_outline(project, outline)
+
+        return project.outline
+
     def approve_chapter(self, project: NovelProject, chapter_id: str) -> Chapter:
         """审校通过章节"""
         chapter = project.chapters.get(chapter_id)

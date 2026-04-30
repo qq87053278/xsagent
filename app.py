@@ -765,7 +765,7 @@ elif page == "人物设定":
 elif page == "故事大纲":
     st.header("故事大纲")
 
-    tab_view_edit, tab_import = st.tabs(["查看与编辑", "导入/覆盖"])
+    tab_view_edit, tab_auto_gen, tab_import = st.tabs(["查看与编辑", "AI 全自动生成", "导入/覆盖"])
 
     # ===== 辅助函数：扁平化大纲节点 =====
     def flatten_outline(node, depth=0):
@@ -889,7 +889,78 @@ elif page == "故事大纲":
         else:
             st.info("暂无章节，请在大纲编辑中通过「添加子节点」添加章级别节点，或导入含章的详细大纲。")
 
-    # ===== Tab 2: 导入/覆盖 =====
+    # ===== Tab 2: AI 全自动生成 =====
+    with tab_auto_gen:
+        st.subheader("AI 全自动生成大纲")
+        st.info("基于已设定的世界观、人物等信息，让 AI 一次性生成完整的「总纲-卷-幕-章」四级大纲结构。")
+
+        if not project.world or not project.world.name:
+            st.warning("请先在【世界观设定】中设定世界观，AI 需要世界观信息来构建合理的故事大纲。")
+        elif not pipeline.generator:
+            st.error("未配置 AI 模型，请在 config.yaml 中设置")
+        else:
+            with st.form("auto_gen_outline_form"):
+                st.markdown("**生成参数**")
+                col_v, col_a, col_c = st.columns(3)
+                with col_v:
+                    num_volumes = st.number_input("卷数", min_value=1, max_value=20, value=3, step=1)
+                with col_a:
+                    min_acts = st.number_input("每卷最少幕数", min_value=3, max_value=20, value=5, step=1)
+                with col_c:
+                    min_chapters = st.number_input("每幕最少章数", min_value=3, max_value=20, value=5, step=1)
+                extra_guidance = st.text_area(
+                    "额外创作指导（可选）",
+                    height=80,
+                    placeholder="如：故事风格偏暗黑、主角要经历三次大挫折、结局要开放式...",
+                )
+
+                total_estimate = num_volumes * min_acts * min_chapters
+                st.caption(f"预估生成: {num_volumes} 卷 × {min_acts}+ 幕 × {min_chapters}+ 章 ≈ 至少 {total_estimate} 章")
+
+                if project.outline:
+                    st.warning("⚠️ 当前已有大纲，全自动生成将覆盖现有大纲。已有的章节关联将被重建。")
+
+                gen_submitted = st.form_submit_button("开始全自动生成", type="primary", use_container_width=True)
+
+            if gen_submitted:
+                with st.spinner("AI 正在构思完整的故事大纲，这可能需要一些时间..."):
+                    try:
+                        outline = pipeline.auto_generate_outline(
+                            project,
+                            num_volumes=int(num_volumes),
+                            min_acts_per_volume=int(min_acts),
+                            min_chapters_per_act=int(min_chapters),
+                            extra_guidance=extra_guidance,
+                        )
+                        # 统计生成结果
+                        vol_count = len([c for c in outline.children if c.level == 1])
+                        act_count = sum(len([a for a in v.children if a.level == 2]) for v in outline.children if v.level == 1)
+                        chap_count = len(outline.flatten_chapters())
+                        st.success(f"大纲生成完成！共 {vol_count} 卷 / {act_count} 幕 / {chap_count} 章")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"生成失败: {e}")
+
+            # 生成后展示当前大纲概要
+            if project.outline and project.outline.children:
+                st.divider()
+                st.subheader("当前大纲概要")
+                for vol in project.outline.children:
+                    if vol.level == 1:
+                        act_count = len([a for a in vol.children if a.level == 2])
+                        chap_count = sum(len([c for c in a.children if c.level == 3]) for a in vol.children if a.level == 2)
+                        with st.expander(f"📖 {vol.title}（{act_count} 幕 / {chap_count} 章）"):
+                            st.markdown(f"**摘要**: {vol.summary}")
+                            for act in vol.children:
+                                if act.level == 2:
+                                    ch_count = len([c for c in act.children if c.level == 3])
+                                    st.markdown(f"&emsp;📜 **{act.title}**（{ch_count} 章）: {act.summary[:60]}...")
+                                    for chap in act.children:
+                                        if chap.level == 3:
+                                            tone = f" [{chap.emotional_tone}]" if chap.emotional_tone else ""
+                                            st.markdown(f"&emsp;&emsp;📄 {chap.title}{tone}: {chap.summary[:40]}...")
+
+    # ===== Tab 3: 导入/覆盖 =====
     with tab_import:
         st.info("上传 JSON 文件将完全覆盖现有大纲。如需保留当前大纲，请先导出备份。")
         with st.expander("查看 JSON 格式示例"):

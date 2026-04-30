@@ -96,6 +96,7 @@ class PromptBuilder:
                 "plot_points": plot_points,
                 "emotional_tone": emotional_tone,
                 "previous_chapter_summary": ctx.previous_chapter_summary,
+                "next_chapter_summary": ctx.next_chapter_summary,
                 "volume_summary": ctx.volume_summary,
                 "act_summary": ctx.act_summary,
             }
@@ -456,6 +457,10 @@ class PromptBuilder:
             parts.append("\n【前一章结尾片段 — 衔接锚点】")
             parts.append("以下是上一章的最后部分，仅作为续写起点。你严禁复述或重写上一章已发生的情节，必须直接续写新篇章内容，从上一章结束的地方自然推进：")
             parts.append(ctx.previous_chapter_content)
+        if ctx.next_chapter_summary:
+            parts.append("\n【下一章方向预告 — 走向引导】")
+            parts.append("以下是下一章的摘要规划，本章结尾需为其做好铺垫和过渡，但不要提前写入下一章的内容：")
+            parts.append(ctx.next_chapter_summary)
         if ctx.previous_plot_memories:
             parts.append("\n【更早章节剧情记忆 — 参考约束】")
             parts.append("以下是你之前章节的关键剧情摘要，作为背景参考，必须遵循不能矛盾：")

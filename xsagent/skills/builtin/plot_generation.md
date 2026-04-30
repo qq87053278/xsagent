@@ -10,6 +10,7 @@ variables:
   - plot_points
   - emotional_tone
   - previous_chapter_summary
+  - next_chapter_summary
 ---
 
 ## 情节约束
@@ -26,6 +27,10 @@ variables:
 
 ### 衔接要求
 {{previous_chapter_summary}}
+
+### 下一章方向预告
+{{next_chapter_summary}}
+本章结尾需为下一章做好铺垫和过渡，但不要提前写入下一章的内容。
 
 ### 创作守则
 1. 严格按摘要展开，不遗漏任何情节点。

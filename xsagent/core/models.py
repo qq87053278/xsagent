@@ -393,6 +393,7 @@ class GenerationContext:
     previous_chapter_content: str = ""        # 前一章结尾片段（用于衔接）
     previous_chapter_plot_memory: str = ""    # 前一章的剧情记忆
     previous_plot_memories: List[str] = field(default_factory=list)  # 前2-5章的剧情记忆
+    next_chapter_summary: str = ""                # 下一章摘要（预告方向）
     branch_directives: List[str] = field(default_factory=list)  # 分支剧情指令
 
     def to_dict(self) -> Dict[str, Any]:
@@ -416,6 +417,7 @@ class GenerationContext:
             "mimicry_mode": self.mimicry_mode,
             "reference_author": self.reference_author,
             "previous_plot_memories": self.previous_plot_memories,
+            "next_chapter_summary": self.next_chapter_summary,
             "branch_directives": self.branch_directives,
         }
         return data
@@ -645,6 +647,12 @@ class NovelProject:
                 # 取最后 800 字作为衔接上下文
                 tail = prev.content[-800:] if len(prev.content) > 800 else prev.content
                 ctx.previous_chapter_content = tail
+
+        # 下一章摘要（如果存在）
+        if current_idx >= 0 and current_idx < len(seq) - 1:
+            next_ch = seq[current_idx + 1]
+            if next_ch.outline_summary:
+                ctx.next_chapter_summary = f"第{next_ch.sequence_number}章《{next_ch.title}》: {next_ch.outline_summary}"
 
         # 前2-5章的剧情记忆（前一章用完整正文，所以这取更前面的4章）
         if current_idx > 1:
