@@ -65,6 +65,16 @@ class FactionStatus(str, Enum):
     RISING = "rising"                # 崛起中
 
 
+class ItemStatus(str, Enum):
+    """物品状态"""
+    NOTHING = "nothing"              # 无状态
+    ACTIVE = "active"                # 正常存在/使用中
+    LOST = "lost"                    # 已遗失
+    DESTROYED = "destroyed"          # 已损毁
+    SEALED = "sealed"                # 封印中
+    DORMANT = "dormant"              # 潜伏/未觉醒
+
+
 @dataclass
 class Character:
     """人物设定卡片"""
@@ -81,7 +91,6 @@ class Character:
     arc: str = ""                           # 人物弧线（成长轨迹）
     relationships: Dict[str, str] = field(default_factory=dict)  # 关系网 {角色名: 关系}
     abilities: List[str] = field(default_factory=list)  # 能力/技能
-    artifacts: str = ""                     # 法宝描述
     spells_skills: str = ""                 # 法术/技能详细描述
     faction_id: Optional[str] = None        # 核心绑定势力ID
     faction_notes: str = ""                 # 势力关系描述（多势力时记录其他势力）
@@ -201,6 +210,34 @@ class Faction:
     def from_dict(cls, data: Dict[str, Any]) -> "Faction":
         data = dict(data)
         data["status"] = FactionStatus(data.get("status", "active"))
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class Item:
+    """物品定义 — 法宝/武器/丹药/材料/宝物等"""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str = ""                        # 物品名称
+    description: str = ""                 # 物品描述
+    item_type: str = "artifact"           # 类型: artifact法宝 / weapon武器 / armor护具 / consumable消耗品 / material材料 / treasure宝物 / other其他
+    grade: str = "normal"                 # 品级: trash垃圾 / common普通 / uncommon优秀 / rare稀有 / epic史诗 / legendary传说 / divine神器
+    effects: str = ""                     # 功效/能力描述
+    origin: str = ""                      # 来源/出处
+    owner_character_id: Optional[str] = None  # 当前持有者角色ID
+    location_id: Optional[str] = None     # 所在地点ID
+    status: ItemStatus = ItemStatus.ACTIVE
+    tags: List[str] = field(default_factory=list)
+    notes: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["status"] = self.status.value
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Item":
+        data = dict(data)
+        data["status"] = ItemStatus(data.get("status", "active"))
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
@@ -441,6 +478,7 @@ class NovelProject:
     branch_plots: Dict[str, BranchPlot] = field(default_factory=dict)  # {id: BranchPlot}
     locations: Dict[str, Location] = field(default_factory=dict)  # {id: Location}
     factions: Dict[str, Faction] = field(default_factory=dict)  # {id: Faction}
+    items: Dict[str, Item] = field(default_factory=dict)  # {id: Item}
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
     version: str = "1.0.0"
@@ -462,6 +500,7 @@ class NovelProject:
             "branch_plots": {k: v.to_dict() for k, v in self.branch_plots.items()},
             "locations": {k: v.to_dict() for k, v in self.locations.items()},
             "factions": {k: v.to_dict() for k, v in self.factions.items()},
+            "items": {k: v.to_dict() for k, v in self.items.items()},
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "version": self.version,
@@ -480,6 +519,7 @@ class NovelProject:
         branch_plots_data = data.pop("branch_plots", {})
         locations_data = data.pop("locations", {})
         factions_data = data.pop("factions", {})
+        items_data = data.pop("items", {})
 
         project = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
         if world_data:
@@ -523,6 +563,7 @@ class NovelProject:
         project.branch_plots = {k: BranchPlot.from_dict(v) for k, v in branch_plots_data.items()}
         project.locations = {k: Location.from_dict(v) for k, v in locations_data.items()}
         project.factions = {k: Faction.from_dict(v) for k, v in factions_data.items()}
+        project.items = {k: Item.from_dict(v) for k, v in items_data.items()}
         return project
 
     def get_character(self, character_id: str) -> Optional[Character]:
@@ -567,6 +608,7 @@ class NovelProject:
                     "personality": char.personality,
                     "motivation": char.motivation,
                     "current_arc": char.arc,
+
                 })
 
         # 大纲路径与当前节点

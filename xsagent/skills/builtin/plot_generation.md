@@ -1,6 +1,6 @@
 ---
 name: plot_generation
-version: "1.0"
+version: "1.1"
 description: 情节生成指令 — 根据大纲节点生成章节情节
 type: plot_generation
 variables:
@@ -10,12 +10,24 @@ variables:
   - plot_points
   - emotional_tone
   - previous_chapter_summary
+  - previous_chapter_plot_memory
+  - previous_chapter_content
   - next_chapter_summary
+  - volume_summary
+  - act_summary
+  - previous_plot_memories
 ---
 
 ## 情节约束
 
 当前章节位置：**{{outline_path}}**
+
+### 所属卷背景
+{{volume_summary}}
+
+### 当前幕要求 — 路线指导
+{{act_summary}}
+以上幕级要求对本次章节创作具有整体的路线指导意义，请在情节推进和氛围营造中严格体现。
 
 ### 本章定位
 - **标题**：{{chapter_title}}
@@ -28,9 +40,21 @@ variables:
 ### 衔接要求
 {{previous_chapter_summary}}
 
+### 前一章剧情记忆 — 情节提要
+上一章的关键剧情与人物状态摘要，新章节必须在此基础上推进：
+{{previous_chapter_plot_memory}}
+
+### 前一章结尾片段 — 衔接锚点
+以下是上一章的最后部分，仅作为续写起点。你严禁复述或重写上一章已发生的情节，必须直接续写新篇章内容，从上一章结束的地方自然推进：
+{{previous_chapter_content}}
+
 ### 下一章方向预告
 {{next_chapter_summary}}
 本章结尾需为下一章做好铺垫和过渡，但不要提前写入下一章的内容。
+
+### 更早章节剧情记忆 — 参考约束
+以下是更早章节的关键剧情摘要，作为背景参考，必须遵循不能矛盾：
+{{previous_plot_memories}}
 
 ### 创作守则
 1. 严格按摘要展开，不遗漏任何情节点。

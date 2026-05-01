@@ -96,9 +96,12 @@ class PromptBuilder:
                 "plot_points": plot_points,
                 "emotional_tone": emotional_tone,
                 "previous_chapter_summary": ctx.previous_chapter_summary,
+                "previous_chapter_plot_memory": ctx.previous_chapter_plot_memory,
+                "previous_chapter_content": ctx.previous_chapter_content,
                 "next_chapter_summary": ctx.next_chapter_summary,
                 "volume_summary": ctx.volume_summary,
                 "act_summary": ctx.act_summary,
+                "previous_plot_memories": "\n".join(f"- {m}" for m in ctx.previous_plot_memories) if ctx.previous_plot_memories else "",
             }
             sections.append(plot_skill.render(plot_ctx))
         else:
@@ -478,8 +481,6 @@ class PromptBuilder:
                 f"  动机: {c.get('motivation', '')}\n"
                 f"  当前弧线: {c.get('current_arc', '')}"
             )
-            if c.get("artifacts"):
-                entry += f"\n  法宝: {c['artifacts']}"
             if c.get("spells_skills"):
                 entry += f"\n  法术/技能: {c['spells_skills']}"
             lines.append(entry)

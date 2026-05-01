@@ -11,7 +11,8 @@ from xsagent.core.models import (
     NovelProject, Chapter, ChapterStatus, Character, WorldBuilding,
     OutlineNode, StyleGuide, CharacterRole, Foreshadowing, ForeshadowingStatus,
     StyleReference, BranchPlot, BranchStatus,
-    Location, LocationStatus, Faction, FactionStatus
+    Location, LocationStatus, Faction, FactionStatus,
+    Item, ItemStatus
 )
 from xsagent.generator.base import BaseGenerator, GenerationRequest, create_request
 from xsagent.generator.prompt_builder import PromptBuilder
@@ -412,7 +413,7 @@ class CreationPipeline:
         project: NovelProject,
         chapter_id: str,
         temperature: float = 0.7,
-        max_tokens: int = 4000,
+        max_tokens: int = 7000,
         stream_callback: Optional[Callable[[str], None]] = None,
         extra_constraints: Optional[List[str]] = None,
     ) -> Chapter:
@@ -573,6 +574,7 @@ class CreationPipeline:
         }
 
         existing_faction_names = {f.name for f in project.factions.values()}
+        existing_item_names = {i.name for i in project.items.values()}
 
         branches_text = ""
         if existing_branches:
@@ -598,7 +600,6 @@ class CreationPipeline:
    - description: 简短描述（外貌、性格、与本章的关系）
    - faction_name: 所属势力名称（如果有且与已有势力匹配，否则留空）
    - faction_affinity: 势力关系描述（如核心成员、外围弟子、敌对等，多势力可描述次要关系）
-   - artifacts: 法宝描述（如持有或使用的重要物品/武器/法宝，没有则留空）
    - spells_skills: 法术/技能描述（如修炼功法、特殊能力、战斗技能等，没有则留空）
 3. new_locations: 本章新出现的地点列表（已有同名地点不要重复），每个包含：
    - name: 地名
@@ -613,7 +614,16 @@ class CreationPipeline:
    - status: 势力状态（active活跃/dissolved已解散/hidden隐秘/at_war交战中/declining衰落中/rising崛起中）
    - level: 级别（minor次要/normal一般/important重要/major大宗/supreme至高）
    - location_name: 绑定地点名称（如果该势力有固定据点且地点已存在，填写名称匹配；否则留空）
-5. branch_plots: 本章中新开启或可延续的分支剧情列表。分支剧情是指：
+5. new_items: 本章新出现的重要物品列表（已有同名物品不要重复），每个包含：
+   - name: 物品名称
+   - description: 物品描述（外观、特性等）
+   - item_type: 类型（artifact法宝/weapon武器/armor护具/consumable消耗品/material材料/treasure宝物/other其他）
+   - grade: 品级（trash垃圾/common普通/uncommon优秀/rare稀有/epic史诗/legendary传说/divine神器）
+   - effects: 功效/能力描述
+   - origin: 来源/出处（如果提及）
+   - owner_name: 当前持有者姓名（如果有且与已有角色匹配，否则留空）
+   - status: 状态（active正常/lost遗失/destroyed损毁/sealed封印/dormant潜伏）
+6. branch_plots: 本章中新开启或可延续的分支剧情列表。分支剧情是指：
    - 本章中埋下但尚未解决的悬念/冲突
    - 新出现的支线任务或人物目标
    - 可独立发展的情节线索（与主线并行但不干扰主线）
@@ -626,13 +636,15 @@ class CreationPipeline:
 已知已有人物（不要重复提取）：{', '.join(existing_char_names) or '无'}
 已知已有地点（不要重复提取）：{', '.join(existing_locations) or '无'}
 已知已有势力（不要重复提取）：{', '.join(existing_faction_names) or '无'}
+已知已有物品（不要重复提取）：{', '.join(existing_item_names) or '无'}
 已知已有活跃分支（如果本章只是推进它们，请返回空列表，不要重复创建）：
 {branches_text}
 返回严格JSON格式，不要任何额外解释或markdown代码块标记：
 {{"plot_memory": "string",
-  "new_characters": [{{"name": "...", "role": "...", "description": "...", "faction_name": "...", "faction_affinity": "...", "artifacts": "...", "spells_skills": "..."}}],
+  "new_characters": [{{"name": "...", "role": "...", "description": "...", "faction_name": "...", "faction_affinity": "...", "spells_skills": "..."}}],
   "new_locations": [{{"name": "...", "description": "...", "status": "...", "level": "...", "hierarchy": "...", "scale": "..."}}],
   "new_factions": [{{"name": "...", "description": "...", "status": "...", "level": "...", "location_name": "..."}}],
+  "new_items": [{{"name": "...", "description": "...", "item_type": "...", "grade": "...", "effects": "...", "origin": "...", "owner_name": "...", "status": "..."}}],
   "branch_plots": [{{"title": "...", "description": "...", "importance": "..."}}]
 }}"""
 
@@ -664,6 +676,7 @@ class CreationPipeline:
                 "new_characters": [],
                 "new_locations": [],
                 "new_factions": [],
+                "new_items": [],
                 "branch_plots": [],
             }
 
@@ -682,7 +695,7 @@ class CreationPipeline:
         - 新增地点到地点列表
         - 新增势力到势力列表
         - 新增分支剧情到分支列表
-        返回应用摘要 {"plot_memory_saved": bool, "new_chars_added": int, "new_locs_added": int, "new_factions_added": int, "new_branches_added": int, "faction_bindings": int}
+        返回应用摘要 {"plot_memory_saved": bool, "new_chars_added": int, "new_locs_added": int, "new_factions_added": int, "new_items_added": int, "new_branches_added": int, "faction_bindings": int}
         """
         chapter = project.chapters.get(chapter_id)
         if not chapter:
@@ -693,6 +706,7 @@ class CreationPipeline:
             "new_chars_added": 0,
             "new_locs_added": 0,
             "new_factions_added": 0,
+            "new_items_added": 0,
             "new_branches_added": 0,
             "faction_bindings": 0,
         }
@@ -720,7 +734,6 @@ class CreationPipeline:
                     name=name,
                     role=role,
                     personality=char_data.get("description", ""),
-                    artifacts=char_data.get("artifacts", ""),
                     spells_skills=char_data.get("spells_skills", ""),
                 )
                 # 尝试绑定势力
@@ -788,6 +801,33 @@ class CreationPipeline:
                 existing_fac_names.add(name)
                 summary["new_factions_added"] += 1
 
+        # 添加新物品
+        existing_item_names = {i.name for i in project.items.values()}
+        char_name_to_id = {c.name: cid for cid, c in project.characters.items()}
+        for item_data in analysis.get("new_items", []):
+            name = item_data.get("name", "").strip()
+            if name and name not in existing_item_names:
+                try:
+                    status = ItemStatus(item_data.get("status", "active").lower())
+                except ValueError:
+                    status = ItemStatus.ACTIVE
+                item = Item(
+                    name=name,
+                    description=item_data.get("description", ""),
+                    item_type=item_data.get("item_type", "artifact"),
+                    grade=item_data.get("grade", "normal"),
+                    effects=item_data.get("effects", ""),
+                    origin=item_data.get("origin", ""),
+                    status=status,
+                )
+                # 尝试绑定持有者
+                owner_name = item_data.get("owner_name", "").strip()
+                if owner_name and owner_name in char_name_to_id:
+                    item.owner_character_id = char_name_to_id[owner_name]
+                project.items[item.id] = item
+                existing_item_names.add(name)
+                summary["new_items_added"] += 1
+
         # 添加新分支剧情
         existing_branch_titles = {b.title for b in project.branch_plots.values()}
         for branch_data in analysis.get("branch_plots", []):
@@ -807,6 +847,78 @@ class CreationPipeline:
         project.updated_at = datetime.now().isoformat()
         self.storage.save(project)
         return summary
+
+    @staticmethod
+    def _repair_truncated_json(text: str) -> Optional[str]:
+        """
+        修复被截断的 JSON 文本：
+        1. 剥离末尾不完整的键值对（截断在字符串/数字/键名中间）
+        2. 补全未闭合的 ] 和 }
+        """
+        if not text or not text.strip():
+            return None
+
+        # 剥离末尾不完整的内容：回退到最后一个完整的结构边界
+        s = text.rstrip()
+        # 去掉末尾可能的不完整 token
+        # 先找到最后一个结构性字符（} ] , " 数字）的位置
+        # 截断可能发生在字符串中间，回退到最后一个完整的 }, ] 或 "
+        last_good = -1
+        for i in range(len(s) - 1, -1, -1):
+            if s[i] in ('}', ']', '"'):
+                last_good = i
+                break
+            elif s[i] == ',':
+                # 逗号后面被截断，去掉这个悬空逗号
+                last_good = i - 1
+                break
+        if last_good < 0:
+            return None
+
+        s = s[:last_good + 1]
+
+        # 去掉末尾悬空逗号
+        s = s.rstrip().rstrip(',')
+
+        # 统计未闭合的括号
+        open_braces = 0
+        open_brackets = 0
+        in_string = False
+        escape = False
+        for ch in s:
+            if escape:
+                escape = False
+                continue
+            if ch == '\\':
+                if in_string:
+                    escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                open_braces += 1
+            elif ch == '}':
+                open_braces -= 1
+            elif ch == '[':
+                open_brackets += 1
+            elif ch == ']':
+                open_brackets -= 1
+
+        # 如果在字符串中间被截断，先闭合字符串
+        if in_string:
+            s += '"'
+
+        # 去掉末尾悬空逗号（闭合字符串后可能出现新的悬空）
+        s = s.rstrip().rstrip(',')
+
+        # 补全括号
+        s += ']' * max(0, open_brackets)
+        s += '}' * max(0, open_braces)
+
+        return s if s else None
 
     def auto_generate_outline(
         self,
@@ -943,7 +1055,7 @@ class CreationPipeline:
             prompt=prompt,
             system_message="你是一位专业的小说大纲策划师。请严格按JSON格式输出完整的四级大纲结构。",
             temperature=0.8,
-            max_tokens=16000,
+            max_tokens=65536,
         )
 
         # 执行生成
@@ -978,6 +1090,7 @@ class CreationPipeline:
             if match:
                 brace_count = 0
                 start = match.start()
+                found = False
                 for i in range(start, len(text)):
                     if text[i] == '{':
                         brace_count += 1
@@ -986,11 +1099,21 @@ class CreationPipeline:
                     if brace_count == 0:
                         try:
                             data = json.loads(text[start:i+1])
+                            found = True
                             break
                         except json.JSONDecodeError:
                             continue
-                else:
-                    raise RuntimeError(f"AI 返回的大纲 JSON 解析失败: {e}\n原始文本前500字: {text[:500]}")
+                if not found:
+                    # JSON 被截断（token 不够），尝试自动补全闭合括号
+                    truncated = text[start:]
+                    repaired = self._repair_truncated_json(truncated)
+                    if repaired:
+                        try:
+                            data = json.loads(repaired)
+                        except json.JSONDecodeError:
+                            raise RuntimeError(f"AI 返回的大纲 JSON 解析失败（可能因 token 不足被截断）: {e}\n原始文本前500字: {text[:500]}")
+                    else:
+                        raise RuntimeError(f"AI 返回的大纲 JSON 解析失败（可能因 token 不足被截断）: {e}\n原始文本前500字: {text[:500]}")
             else:
                 raise RuntimeError(f"AI 返回的大纲 JSON 解析失败: {e}\n原始文本前500字: {text[:500]}")
 

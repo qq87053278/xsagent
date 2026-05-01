@@ -6,9 +6,11 @@ model:
   model: deepseek-v4-pro           # 模型名称
   api_key: "sk-0e592009d4824e41bfc9269251307500"              # API Key（建议通过环境变量 OPENAI_API_KEY 设置）
   base_url: "https://api.deepseek.com"             # 自定义 API 地址（如使用第三方中转）
-  temperature:          # 默认生成温度
-  max_tokens:          # 默认最大 token 数
-  timeout: 120             # 请求超时（秒）
+  temperature: 0.7       # 默认生成温度
+  max_tokens: 7000         # 默认最大 token 数
+  timeout: 600             # 请求超时（秒）
+  thinking: true           # 是否启用思考模式（DeepSeek/OpenAI o系列等支持的模型）
+  thinking_budget_tokens: 0  # 思考过程最大 token 数（0 表示不限制）
 
 # 存储配置
 storage:

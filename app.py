@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import json
+import time
 import streamlit as st
 from datetime import datetime
 
@@ -19,7 +20,8 @@ from xsagent.core.models import (
     NovelProject, Character, WorldBuilding, OutlineNode,
     StyleGuide, CharacterRole, ChapterStatus, Foreshadowing,
     ForeshadowingStatus, StyleReference, BranchPlot, BranchStatus,
-    Location, LocationStatus, Faction, FactionStatus
+    Location, LocationStatus, Faction, FactionStatus,
+    Item, ItemStatus
 )
 from xsagent.storage.json_storage import JSONStorage
 from xsagent.skills.skill_registry import SkillRegistry
@@ -138,7 +140,7 @@ page = None
 if st.session_state.wizard_step == 0 and st.session_state.current_project_id:
     page = st.sidebar.radio(
         "导航",
-        ["项目概览", "世界观设定", "地点管理", "势力管理", "人物设定", "故事大纲", "伏笔设计", "风格设定", "章节创作", "导出小说"],
+        ["项目概览", "世界观设定", "地点管理", "势力管理", "人物设定", "物品定义", "故事大纲", "伏笔设计", "风格设定", "章节创作", "导出小说"],
     )
 
 # ========== 主内容区 ==========
@@ -683,7 +685,6 @@ elif page == "人物设定":
                         cappearance = st.text_area("外貌描写", value=char.appearance, height=80, key=f"char_appearance_{char.id}")
                         cpersonality = st.text_area("性格特征", value=char.personality, height=80, key=f"char_personality_{char.id}")
                         cmotivation = st.text_area("核心动机", value=char.motivation, height=80, key=f"char_motivation_{char.id}")
-                        cartifacts = st.text_area("法宝", value=char.artifacts, height=80, key=f"char_artifacts_{char.id}")
                     with col2:
                         cgender = st.text_input("性别", value=char.gender or "", key=f"char_gender_{char.id}")
                         cbackground = st.text_area("身世背景", value=char.background, height=80, key=f"char_background_{char.id}")
@@ -707,7 +708,6 @@ elif page == "人物设定":
                         char.background = cbackground
                         char.motivation = cmotivation
                         char.arc = carc
-                        char.artifacts = cartifacts
                         char.spells_skills = cspells_skills
                         char.abilities = [a.strip() for a in cabilities.split(",") if a.strip()]
                         char.notes = cnotes
@@ -744,20 +744,160 @@ elif page == "人物设定":
             cmotivation = st.text_area("核心动机")
             cbackground = st.text_area("身世背景")
             carc = st.text_area("人物弧线")
-            cartifacts = st.text_area("法宝")
             cspells_skills = st.text_area("法术/技能")
             if st.form_submit_button("添加") and cname:
                 char = pipeline.add_character(
                     project, name=cname, role=CharacterRole(crole),
                     personality=cpersonality, motivation=cmotivation,
                     background=cbackground, arc=carc,
-                    artifacts=cartifacts, spells_skills=cspells_skills,
+                    spells_skills=cspells_skills,
                 )
                 if cfaction_id:
                     char.faction_id = cfaction_id
                     char.faction_notes = cfaction_notes
                     save_project(project)
                 st.success(f"人物 {cname} 已添加")
+                st.rerun()
+
+
+# ---------- 页面：物品定义 ----------
+elif page == "物品定义":
+    st.header("物品定义")
+
+    ITEM_TYPE_OPTIONS = ["artifact", "weapon", "armor", "consumable", "material", "treasure", "other"]
+    ITEM_TYPE_LABELS = {"artifact": "法宝", "weapon": "武器", "armor": "护具", "consumable": "消耗品", "material": "材料", "treasure": "宝物", "other": "其他"}
+    GRADE_OPTIONS = ["nothing", "common", "uncommon", "rare", "epic", "legendary", "divine"]
+    GRADE_LABELS = {"nothing":"无品级","common": "凡品", "uncommon": "法品", "rare": "灵品", "epic": "宝品", "legendary": "道品", "divine": "仙品"}
+    ITEM_STATUS_LIST = [ItemStatus.NOTHING,ItemStatus.ACTIVE, ItemStatus.LOST, ItemStatus.DESTROYED, ItemStatus.SEALED, ItemStatus.DORMANT]
+    ITEM_STATUS_LABELS = {"nothing":"无状态","active": "正常", "lost": "已遗失", "destroyed": "已损毁", "sealed": "封印中", "dormant": "潜伏/未觉醒"}
+
+    tab_list, tab_add = st.tabs(["物品列表", "添加物品"])
+
+    with tab_list:
+        if not project.items:
+            st.info("暂无物品，请在「添加物品」中手动添加。")
+        else:
+            for item in sorted(project.items.values(), key=lambda x: (GRADE_OPTIONS.index(x.grade) if x.grade in GRADE_OPTIONS else 0, x.name), reverse=True):
+                owner_name = ""
+                if item.owner_character_id and item.owner_character_id in project.characters:
+                    owner_name = project.characters[item.owner_character_id].name
+                loc_name = ""
+                if item.location_id and item.location_id in project.locations:
+                    loc_name = project.locations[item.location_id].name
+                grade_label = GRADE_LABELS.get(item.grade, item.grade)
+                type_label = ITEM_TYPE_LABELS.get(item.item_type, item.item_type)
+                header = f"⚔️ {item.name} [{grade_label}] ({type_label})"
+                if owner_name:
+                    header += f" — 👤 {owner_name}"
+                with st.expander(header):
+                    with st.form(f"edit_item_form_{item.id}"):
+                        iname = st.text_input("物品名称", value=item.name, key=f"item_name_{item.id}")
+                        idesc = st.text_area("描述", value=item.description, height=60, key=f"item_desc_{item.id}")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            itype = st.selectbox(
+                                "类型", ITEM_TYPE_OPTIONS,
+                                index=ITEM_TYPE_OPTIONS.index(item.item_type) if item.item_type in ITEM_TYPE_OPTIONS else 0,
+                                format_func=lambda x: ITEM_TYPE_LABELS.get(x, x),
+                                key=f"item_type_{item.id}",
+                            )
+                            istatus = st.selectbox(
+                                "状态", ITEM_STATUS_LIST,
+                                index=ITEM_STATUS_LIST.index(item.status),
+                                format_func=lambda s: ITEM_STATUS_LABELS.get(s.value, s.value),
+                                key=f"item_status_{item.id}",
+                            )
+                        with col2:
+                            igrade = st.selectbox(
+                                "品级", GRADE_OPTIONS,
+                                index=GRADE_OPTIONS.index(item.grade) if item.grade in GRADE_OPTIONS else 1,
+                                format_func=lambda x: GRADE_LABELS.get(x, x),
+                                key=f"item_grade_{item.id}",
+                            )
+                            # 持有者选择
+                            char_options = {"": "（无）"}
+                            for cid, cchar in project.characters.items():
+                                char_options[cid] = cchar.name
+                            iowner = st.selectbox(
+                                "持有者",
+                                options=list(char_options.keys()),
+                                index=list(char_options.keys()).index(item.owner_character_id) if item.owner_character_id in char_options else 0,
+                                format_func=lambda x: char_options[x],
+                                key=f"item_owner_{item.id}",
+                            )
+                        ieffects = st.text_area("功效/能力", value=item.effects, height=60, key=f"item_effects_{item.id}")
+                        iorigin = st.text_input("来源/出处", value=item.origin, key=f"item_origin_{item.id}")
+                        # 所在地点
+                        loc_options = {"": "（无）"}
+                        for lid, lloc in project.locations.items():
+                            loc_options[lid] = lloc.name
+                        iloc = st.selectbox(
+                            "所在地点",
+                            options=list(loc_options.keys()),
+                            index=list(loc_options.keys()).index(item.location_id) if item.location_id in loc_options else 0,
+                            format_func=lambda x: loc_options[x],
+                            key=f"item_loc_{item.id}",
+                        )
+                        itags = st.text_input("标签（逗号分隔）", value=", ".join(item.tags), key=f"item_tags_{item.id}")
+                        inotes = st.text_area("备忘", value=item.notes, height=40, key=f"item_notes_{item.id}")
+
+                        if st.form_submit_button("保存修改"):
+                            item.name = iname
+                            item.description = idesc
+                            item.item_type = itype
+                            item.grade = igrade
+                            item.effects = ieffects
+                            item.origin = iorigin
+                            item.owner_character_id = iowner if iowner else None
+                            item.location_id = iloc if iloc else None
+                            item.status = istatus
+                            item.tags = [t.strip() for t in itags.split(",") if t.strip()]
+                            item.notes = inotes
+                            save_project(project)
+                            st.success(f"物品 {iname} 已更新")
+                            st.rerun()
+
+                    if st.button("删除物品", key=f"del_item_{item.id}", type="secondary"):
+                        del project.items[item.id]
+                        save_project(project)
+                        st.success(f"物品 {item.name} 已删除")
+                        st.rerun()
+
+    with tab_add:
+        with st.form("add_item"):
+            iname = st.text_input("物品名称 *")
+            idesc = st.text_area("描述")
+            col1, col2 = st.columns(2)
+            with col1:
+                itype = st.selectbox("类型", ITEM_TYPE_OPTIONS, format_func=lambda x: ITEM_TYPE_LABELS.get(x, x))
+                istatus = st.selectbox("状态", ITEM_STATUS_LIST, format_func=lambda s: ITEM_STATUS_LABELS.get(s.value, s.value))
+            with col2:
+                igrade = st.selectbox("品级", GRADE_OPTIONS, index=1, format_func=lambda x: GRADE_LABELS.get(x, x))
+                char_options = {"": "（无）"}
+                for cid, cchar in project.characters.items():
+                    char_options[cid] = cchar.name
+                iowner = st.selectbox("持有者", options=list(char_options.keys()), format_func=lambda x: char_options[x])
+            ieffects = st.text_area("功效/能力")
+            iorigin = st.text_input("来源/出处")
+            loc_options = {"": "（无）"}
+            for lid, lloc in project.locations.items():
+                loc_options[lid] = lloc.name
+            iloc = st.selectbox("所在地点", options=list(loc_options.keys()), format_func=lambda x: loc_options[x])
+            itags = st.text_input("标签（逗号分隔）")
+            inotes = st.text_area("备忘", height=40)
+            if st.form_submit_button("添加") and iname:
+                new_item = Item(
+                    name=iname, description=idesc, item_type=itype, grade=igrade,
+                    effects=ieffects, origin=iorigin,
+                    owner_character_id=iowner if iowner else None,
+                    location_id=iloc if iloc else None,
+                    status=istatus,
+                    tags=[t.strip() for t in itags.split(",") if t.strip()],
+                    notes=inotes,
+                )
+                project.items[new_item.id] = new_item
+                save_project(project)
+                st.success(f"物品 {iname} 已添加")
                 st.rerun()
 
 
@@ -923,23 +1063,65 @@ elif page == "故事大纲":
                 gen_submitted = st.form_submit_button("开始全自动生成", type="primary", use_container_width=True)
 
             if gen_submitted:
-                with st.spinner("AI 正在构思完整的故事大纲，这可能需要一些时间..."):
-                    try:
-                        outline = pipeline.auto_generate_outline(
-                            project,
-                            num_volumes=int(num_volumes),
-                            min_acts_per_volume=int(min_acts),
-                            min_chapters_per_act=int(min_chapters),
-                            extra_guidance=extra_guidance,
-                        )
-                        # 统计生成结果
-                        vol_count = len([c for c in outline.children if c.level == 1])
-                        act_count = sum(len([a for a in v.children if a.level == 2]) for v in outline.children if v.level == 1)
-                        chap_count = len(outline.flatten_chapters())
-                        st.success(f"大纲生成完成！共 {vol_count} 卷 / {act_count} 幕 / {chap_count} 章")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"生成失败: {e}")
+                st.subheader("生成进度")
+                timer_placeholder = st.empty()
+                status_placeholder = st.empty()
+                stream_container = st.container()
+                with stream_container:
+                    stream_text_area = st.empty()
+
+                start_time = time.time()
+                # 使用可变容器，避免 nonlocal 在模块顶层不可用的问题
+                state = {"full_text": "", "has_error": False, "error_msg": ""}
+
+                def _update_timer():
+                    elapsed = time.time() - start_time
+                    mins, secs = divmod(int(elapsed), 60)
+                    timer_placeholder.caption(f"⏱️ 已耗时: {mins:02d}:{secs:02d}")
+
+                def _stream_callback(chunk: str):
+                    if chunk.startswith("\n[生成错误:"):
+                        state["has_error"] = True
+                        state["error_msg"] = chunk.strip()
+                        return
+                    state["full_text"] += chunk
+                    _update_timer()
+                    # 实时显示已生成的文本（截取尾部避免过长）
+                    display = state["full_text"]
+                    if len(display) > 3000:
+                        display = "...（前部内容已省略）...\n" + display[-3000:]
+                    stream_text_area.code(display, language="json")
+
+                status_placeholder.info("AI 正在构思完整的故事大纲（思考模式下可能需要数分钟）...")
+                _update_timer()
+
+                try:
+                    outline = pipeline.auto_generate_outline(
+                        project,
+                        num_volumes=int(num_volumes),
+                        min_acts_per_volume=int(min_acts),
+                        min_chapters_per_act=int(min_chapters),
+                        extra_guidance=extra_guidance,
+                        stream_callback=_stream_callback,
+                    )
+
+                    if state["has_error"]:
+                        raise RuntimeError(state["error_msg"])
+
+                    elapsed = time.time() - start_time
+                    mins, secs = divmod(int(elapsed), 60)
+                    # 统计生成结果
+                    vol_count = len([c for c in outline.children if c.level == 1])
+                    act_count = sum(len([a for a in v.children if a.level == 2]) for v in outline.children if v.level == 1)
+                    chap_count = len(outline.flatten_chapters())
+                    status_placeholder.success(f"大纲生成完成！共 {vol_count} 卷 / {act_count} 幕 / {chap_count} 章（耗时 {mins:02d}:{secs:02d}）")
+                    stream_text_area.empty()
+                    st.rerun()
+                except Exception as e:
+                    elapsed = time.time() - start_time
+                    mins, secs = divmod(int(elapsed), 60)
+                    timer_placeholder.caption(f"⏱️ 总耗时: {mins:02d}:{secs:02d}")
+                    status_placeholder.error(f"生成失败（耗时 {mins:02d}:{secs:02d}）: {e}")
 
             # 生成后展示当前大纲概要
             if project.outline and project.outline.children:
@@ -1426,7 +1608,7 @@ elif page == "章节创作":
         else:
             gen_cols = st.columns([1, 1])
             temperature = gen_cols[0].slider("温度", 0.0, 1.0, 0.7, 0.05)
-            max_tokens = gen_cols[1].number_input("最大Token", 1000, 8000, 4000, 500)
+            max_tokens = gen_cols[1].number_input("最大Token", 1000, 8000, 7000, 4000)
 
             if st.button("生成章节", type="primary", use_container_width=True):
                 # 生成前检查必要字段
@@ -1499,6 +1681,8 @@ elif page == "章节创作":
                         st.info(f"🏛️ 自动发现 {summary['new_factions_added']} 个新势力，已添加到势力管理")
                     if summary.get("faction_bindings", 0) > 0:
                         st.info(f"🔗 自动绑定 {summary['faction_bindings']} 个人物势力关系")
+                    if summary.get("new_items_added", 0) > 0:
+                        st.info(f"📦 自动发现 {summary['new_items_added']} 个新物品，已添加到物品定义")
                     if summary.get("new_branches_added", 0) > 0:
                         st.info(f"🌿 自动发现 {summary['new_branches_added']} 个新分支剧情，已添加到分支列表")
                 except Exception as e:

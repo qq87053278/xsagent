@@ -39,6 +39,7 @@ class GenerationResult:
     raw_response: Any = None
     success: bool = True
     error_message: str = ""
+    reasoning_content: str = ""              # 思考模式下的推理过程文本
 
 
 class BaseGenerator(ABC):
@@ -48,7 +49,7 @@ class BaseGenerator(ABC):
         self.config = config
         self.model_name = config.get("model", "gpt-4")
         self.default_temperature = config.get("temperature", 0.7)
-        self.default_max_tokens = config.get("max_tokens", 4000)
+        self.default_max_tokens = config.get("max_tokens", 7000)
 
     @abstractmethod
     def generate(self, request: GenerationRequest) -> GenerationResult:

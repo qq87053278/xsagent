@@ -58,7 +58,7 @@ model:
   api_key: ""               # API Key（建议走环境变量）
   base_url: ""              # 自定义 API 地址（第三方中转）
   temperature: 0.7
-  max_tokens: 4000
+  max_tokens: 7000
   timeout: 120
 
 storage:

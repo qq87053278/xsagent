@@ -336,7 +336,7 @@ def main():
     p_gen_ch.add_argument("--chapter", default=None, help="章节ID")
     p_gen_ch.add_argument("--seq", type=int, default=None, help="章节序号")
     p_gen_ch.add_argument("--temperature", type=float, default=0.7, help="生成温度")
-    p_gen_ch.add_argument("--max-tokens", type=int, default=4000, help="最大token数")
+    p_gen_ch.add_argument("--max-tokens", type=int, default=7000, help="最大token数")
     p_gen_ch.add_argument("--stream", action="store_true", help="流式输出")
 
     # export
