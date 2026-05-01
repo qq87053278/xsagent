@@ -412,7 +412,6 @@ class GenerationContext:
     这是确保 AI 输出贴合设定的关键数据结构
     """
     project_title: str = ""
-    world_summary: str = ""                 # 世界观浓缩摘要
     relevant_characters: List[Dict[str, Any]] = field(default_factory=list)
     outline_path: List[str] = field(default_factory=list)  # 当前节点路径 [卷, 幕, 章]
     current_node: Optional[OutlineNode] = None
@@ -436,7 +435,6 @@ class GenerationContext:
     def to_dict(self) -> Dict[str, Any]:
         data = {
             "project_title": self.project_title,
-            "world_summary": self.world_summary,
             "relevant_characters": self.relevant_characters,
             "outline_path": self.outline_path,
             "current_node": self.current_node.to_dict() if self.current_node else None,
@@ -555,6 +553,11 @@ class NovelProject:
                     "notes": "",
                 }
             project.outline = OutlineNode.from_dict(outline_data)
+        # 兼容旧数据：如果 characters/chapters 被存为 list 而非 dict，自动转换
+        if isinstance(characters_data, list):
+            characters_data = {c.get("id", str(uuid.uuid4())[:8]): c for c in characters_data}
+        if isinstance(chapters_data, list):
+            chapters_data = {c.get("id", str(uuid.uuid4())[:8]): c for c in chapters_data}
         project.characters = {k: Character.from_dict(v) for k, v in characters_data.items()}
         project.chapters = {k: Chapter.from_dict(v) for k, v in chapters_data.items()}
         project.style = StyleGuide.from_dict(style_data)
@@ -588,15 +591,6 @@ class NovelProject:
         ctx.project_title = self.title
 
         # 世界观摘要
-        if self.world:
-            ctx.world_summary = (
-                f"世界名称: {self.world.name}\n"
-                f"题材: {self.world.genre}\n"
-                f"时代: {self.world.era}\n"
-                f"核心规则: {', '.join(self.world.rules[:5])}\n"
-                f"力量体系: {self.world.power_system[:200]}..."
-                if len(self.world.power_system) > 200 else self.world.power_system
-            )
 
         # 相关角色
         for cid in chapter.characters_present:
@@ -745,6 +739,33 @@ class NovelProject:
         if style.mimicry_mode:
             ctx.mimicry_mode = True
             ctx.reference_author = style.reference_author
+
+        # 分支剧情指令 — 本章需推进/呼应的活跃分支
+        if self.branch_plots:
+            active_branches = [
+                b for b in self.branch_plots.values()
+                if b.status in (BranchStatus.OPEN, BranchStatus.IN_PROGRESS)
+            ]
+            if active_branches:
+                progressed = []
+                referenced = []
+                for branch in active_branches:
+                    if chapter_id in branch.progress_chapter_ids:
+                        progressed.append(
+                            f"- [{branch.importance}] {branch.title}: {branch.description}"
+                        )
+                    else:
+                        referenced.append(
+                            f"- [{branch.importance}] {branch.title}: {branch.description}"
+                        )
+                if progressed:
+                    ctx.branch_directives.append("【本章需推进的分支剧情】")
+                    ctx.branch_directives.extend(progressed)
+                    ctx.branch_directives.append("推进要求：在本章中让该分支有实质性进展，可以是触发新事件、揭示线索、改变人物关系等，避免一笔带过。")
+                if referenced:
+                    ctx.branch_directives.append("【本章需呼应的活跃分支】")
+                    ctx.branch_directives.extend(referenced)
+                    ctx.branch_directives.append("呼应要求：在合适的地方提及或暗示这些分支的存在，保持读者记忆，但不要喧宾夺主。")
 
         return ctx
 

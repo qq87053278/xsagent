@@ -905,7 +905,7 @@ elif page == "物品定义":
 elif page == "故事大纲":
     st.header("故事大纲")
 
-    tab_view_edit, tab_auto_gen, tab_import = st.tabs(["查看与编辑", "AI 全自动生成", "导入/覆盖"])
+    tab_view_edit, tab_auto_gen, tab_continue, tab_import = st.tabs(["查看与编辑", "AI 全自动生成", "大纲续写", "导入/覆盖"])
 
     # ===== 辅助函数：扁平化大纲节点 =====
     def flatten_outline(node, depth=0):
@@ -1054,6 +1054,16 @@ elif page == "故事大纲":
                     placeholder="如：故事风格偏暗黑、主角要经历三次大挫折、结局要开放式...",
                 )
 
+                st.markdown("**阶段性要求（可选，控制每卷的剧情/实力边界）**")
+                st.caption("每行对应一卷的约束，AI 会严格限制每卷的内容范围。留空表示不做限制。")
+                vol_requirements_text = st.text_area(
+                    "各卷阶段性约束",
+                    height=120,
+                    placeholder="第1卷：主角实力到达练气期，加入宗门\n第2卷：主角突破筑基期，参加宗门大比\n第3卷：主角进入金丹期，外出历练",
+                    key="vol_req_text",
+                )
+                vol_requirements = [line.strip() for line in vol_requirements_text.strip().splitlines() if line.strip()] if vol_requirements_text.strip() else []
+
                 total_estimate = num_volumes * min_acts * min_chapters
                 st.caption(f"预估生成: {num_volumes} 卷 × {min_acts}+ 幕 × {min_chapters}+ 章 ≈ 至少 {total_estimate} 章")
 
@@ -1102,6 +1112,7 @@ elif page == "故事大纲":
                         min_acts_per_volume=int(min_acts),
                         min_chapters_per_act=int(min_chapters),
                         extra_guidance=extra_guidance,
+                        volume_requirements=vol_requirements if vol_requirements else None,
                         stream_callback=_stream_callback,
                     )
 
@@ -1142,7 +1153,132 @@ elif page == "故事大纲":
                                             tone = f" [{chap.emotional_tone}]" if chap.emotional_tone else ""
                                             st.markdown(f"&emsp;&emsp;📄 {chap.title}{tone}: {chap.summary[:40]}...")
 
-    # ===== Tab 3: 导入/覆盖 =====
+    # ===== Tab 3: 大纲续写 =====
+    with tab_continue:
+        st.subheader("大纲续写")
+        st.info("基于已有大纲内容，让 AI 续写新的卷/幕/章。AI 会参考最近的 10 幕内容作为上下文，越靠后的幕权重越高。")
+
+        if not project.outline or not project.outline.children:
+            st.warning("当前没有大纲，请先使用【AI 全自动生成】创建初始大纲。")
+        elif not pipeline.generator:
+            st.error("未配置 AI 模型，请在 config.yaml 中设置")
+        else:
+            # 显示当前大纲规模
+            existing_vols = [v for v in project.outline.children if v.level == 1]
+            existing_acts = sum(len([a for a in v.children if a.level == 2]) for v in existing_vols)
+            existing_chaps = len(project.outline.flatten_chapters())
+            st.caption(f"当前大纲: {len(existing_vols)} 卷 / {existing_acts} 幕 / {existing_chaps} 章")
+
+            with st.form("continue_outline_form"):
+                st.markdown("**续写参数**")
+                col_nv, col_a2, col_c2 = st.columns(3)
+                with col_nv:
+                    cont_num_volumes = st.number_input("续写卷数", min_value=1, max_value=10, value=1, step=1, key="cont_nvol")
+                with col_a2:
+                    cont_min_acts = st.number_input("每卷最少幕数", min_value=3, max_value=20, value=5, step=1, key="cont_nact")
+                with col_c2:
+                    cont_min_chapters = st.number_input("每幕最少章数", min_value=3, max_value=20, value=5, step=1, key="cont_nchap")
+                cont_extra_guidance = st.text_area(
+                    "额外创作指导（可选）",
+                    height=80,
+                    placeholder="如：本卷要揭开反派身份、主角觉醒新能力...",
+                    key="cont_guidance",
+                )
+
+                next_vol_num = len(existing_vols) + 1
+
+                st.markdown("**阶段性要求（可选，控制每卷的剧情/实力边界）**")
+                st.caption("每行对应续写一卷的约束，AI 会严格限制每卷的内容范围。留空表示不做限制。")
+                cont_vol_req_text = st.text_area(
+                    "各卷阶段性约束",
+                    height=120,
+                    placeholder=f"第{next_vol_num}卷：主角实力到达XX境界\n第{next_vol_num+1}卷：主角完成XX任务",
+                    key="cont_vol_req_text",
+                )
+                cont_vol_requirements = [line.strip() for line in cont_vol_req_text.strip().splitlines() if line.strip()] if cont_vol_req_text.strip() else []
+
+                est_new_chaps = cont_num_volumes * cont_min_acts * cont_min_chapters
+                st.caption(f"将从第 {next_vol_num} 卷开始续写，预估新增 ≈ {est_new_chaps} 章")
+
+                cont_submitted = st.form_submit_button("开始续写大纲", type="primary", use_container_width=True)
+
+            if cont_submitted:
+                st.subheader("续写进度")
+                cont_timer_ph = st.empty()
+                cont_status_ph = st.empty()
+                cont_stream_container = st.container()
+                with cont_stream_container:
+                    cont_stream_area = st.empty()
+
+                cont_start_time = time.time()
+                cont_state = {"full_text": "", "has_error": False, "error_msg": ""}
+
+                def _cont_update_timer():
+                    elapsed = time.time() - cont_start_time
+                    mins, secs = divmod(int(elapsed), 60)
+                    cont_timer_ph.caption(f"⏱️ 已耗时: {mins:02d}:{secs:02d}")
+
+                def _cont_stream_callback(chunk: str):
+                    if chunk.startswith("\n[生成错误:"):
+                        cont_state["has_error"] = True
+                        cont_state["error_msg"] = chunk.strip()
+                        return
+                    cont_state["full_text"] += chunk
+                    _cont_update_timer()
+                    display = cont_state["full_text"]
+                    if len(display) > 3000:
+                        display = "...（前部内容已省略）...\n" + display[-3000:]
+                    cont_stream_area.code(display, language="json")
+
+                cont_status_ph.info("AI 正在续写大纲（思考模式下可能需要数分钟）...")
+                _cont_update_timer()
+
+                try:
+                    added_count = pipeline.continue_outline(
+                        project,
+                        num_new_volumes=int(cont_num_volumes),
+                        min_acts_per_volume=int(cont_min_acts),
+                        min_chapters_per_act=int(cont_min_chapters),
+                        extra_guidance=cont_extra_guidance,
+                        volume_requirements=cont_vol_requirements if cont_vol_requirements else None,
+                        stream_callback=_cont_stream_callback,
+                    )
+
+                    if cont_state["has_error"]:
+                        raise RuntimeError(cont_state["error_msg"])
+
+                    elapsed = time.time() - cont_start_time
+                    mins, secs = divmod(int(elapsed), 60)
+                    # 统计续写后总量
+                    total_vols = len([v for v in project.outline.children if v.level == 1])
+                    total_chaps = len(project.outline.flatten_chapters())
+                    cont_status_ph.success(
+                        f"续写完成！新增 {added_count} 卷（当前共 {total_vols} 卷 / {total_chaps} 章，耗时 {mins:02d}:{secs:02d}）"
+                    )
+                    cont_stream_area.empty()
+                    st.rerun()
+                except Exception as e:
+                    elapsed = time.time() - cont_start_time
+                    mins, secs = divmod(int(elapsed), 60)
+                    cont_timer_ph.caption(f"⏱️ 总耗时: {mins:02d}:{secs:02d}")
+                    cont_status_ph.error(f"续写失败（耗时 {mins:02d}:{secs:02d}）: {e}")
+
+            # 续写后展示当前大纲概要
+            if project.outline and project.outline.children:
+                st.divider()
+                st.subheader("当前大纲概要")
+                for vol in project.outline.children:
+                    if vol.level == 1:
+                        act_count = len([a for a in vol.children if a.level == 2])
+                        chap_count = sum(len([c for c in a.children if c.level == 3]) for a in vol.children if a.level == 2)
+                        with st.expander(f"📖 {vol.title}（{act_count} 幕 / {chap_count} 章）"):
+                            st.markdown(f"**摘要**: {vol.summary}")
+                            for act in vol.children:
+                                if act.level == 2:
+                                    ch_count = len([c for c in act.children if c.level == 3])
+                                    st.markdown(f"&emsp;📜 **{act.title}**（{ch_count} 章）: {act.summary[:60]}...")
+
+    # ===== Tab 4: 导入/覆盖 =====
     with tab_import:
         st.info("上传 JSON 文件将完全覆盖现有大纲。如需保留当前大纲，请先导出备份。")
         with st.expander("查看 JSON 格式示例"):
@@ -1602,24 +1738,34 @@ elif page == "章节创作":
             st.info("暂无活跃分支。AI 审校时自动识别，或手动添加。")
 
     with col_right:
+        # ---- 防重复点击状态管理 ----
+        if "processing_action" not in st.session_state:
+            st.session_state.processing_action = None
+        is_processing = st.session_state.processing_action is not None
+
         st.subheader("🤖 内容生成")
         if not pipeline.generator:
             st.error("未配置 AI 模型，请在 config.yaml 中设置")
         else:
             gen_cols = st.columns([1, 1])
-            temperature = gen_cols[0].slider("温度", 0.0, 1.0, 0.7, 0.05)
-            max_tokens = gen_cols[1].number_input("最大Token", 1000, 8000, 7000, 4000)
+            temperature = gen_cols[0].slider("温度", 0.0, 1.0, 0.7, 0.05, disabled=is_processing)
+            max_tokens = gen_cols[1].number_input("最大Token", 1000, 8000, 7000, 4000, disabled=is_processing)
 
-            if st.button("生成章节", type="primary", use_container_width=True):
+            if st.button("生成章节", type="primary", use_container_width=True, disabled=is_processing):
+                st.session_state.processing_action = "generate"
+                st.session_state.generation_text = ""
+                st.session_state._gen_buffer = ""
+                st.rerun()
+
+            # ---- 执行：生成章节 ----
+            if st.session_state.processing_action == "generate":
                 # 生成前检查必要字段
                 if not ch.outline_summary:
                     st.warning("⚠️ 本章摘要为空，AI 可能无法按预期生成内容。请在左侧「情节流程」中填写并保存。")
                 if not ch.characters_present:
                     st.warning("⚠️ 未选择出场人物，AI 可能自行编造角色。请在左侧「出场人物」中选择并更新。")
 
-                st.session_state.generation_text = ""
                 placeholder = st.empty()
-                st.session_state._gen_buffer = ""
 
                 def on_chunk(chunk: str):
                     st.session_state._gen_buffer += chunk
@@ -1648,6 +1794,60 @@ elif page == "章节创作":
                         st.session_state.generation_text = st.session_state._gen_buffer
                     except Exception as e:
                         st.error(f"生成失败: {e}")
+                    finally:
+                        st.session_state[f"chapter_content_editor_{ch.id}"] = ch.content or st.session_state.generation_text or ""
+                        st.session_state.processing_action = None
+                        st.rerun()
+
+        # --- 修订重写区域 ---
+        st.divider()
+        st.subheader("🔄 修订重写")
+        if ch.content and ch.content.strip():
+            st.caption("基于已有正文，按你的修改意见让 AI 修订细节，保留整体结构。")
+            revision_notes = st.text_area(
+                "修改意见",
+                height=120,
+                placeholder="例如：\n- 第二段的战斗描写太平淡，增加更多动作细节和紧张感\n- 把主角的语气从犹豫改为坚定\n- 结尾的转折太突兀，增加一些铺垫",
+                key="revision_notes",
+                disabled=is_processing,
+            )
+            if st.button("修订重写", type="secondary", use_container_width=True, disabled=is_processing):
+                if not revision_notes or not revision_notes.strip():
+                    st.warning("请输入修改意见")
+                    st.session_state.processing_action = None
+                else:
+                    st.session_state.processing_action = "revise"
+                    st.session_state.generation_text = ""
+                    st.session_state._gen_buffer = ""
+                    st.rerun()
+
+            # ---- 执行：修订重写 ----
+            if st.session_state.processing_action == "revise":
+                rev_placeholder = st.empty()
+
+                def on_rev_chunk(chunk: str):
+                    st.session_state._gen_buffer += chunk
+                    rev_placeholder.markdown(st.session_state._gen_buffer)
+
+                with st.spinner("修订中..."):
+                    try:
+                        pipeline.revise_chapter(
+                            project, ch.id,
+                            revision_notes=revision_notes,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            stream_callback=on_rev_chunk,
+                        )
+                        st.session_state.generation_text = st.session_state._gen_buffer
+                        st.success("修订完成")
+                    except Exception as e:
+                        st.error(f"修订失败: {e}")
+                    finally:
+                        st.session_state[f"chapter_content_editor_{ch.id}"] = ch.content or st.session_state.generation_text or ""
+                        st.session_state.processing_action = None
+                        st.rerun()
+        else:
+            st.info("章节正文为空，请先生成章节内容后再进行修订。")
 
         st.divider()
         st.subheader("✏️ 内容编辑")
@@ -1655,16 +1855,31 @@ elif page == "章节创作":
             "章节正文",
             value=ch.content or st.session_state.generation_text,
             height=400,
+            disabled=is_processing,
+            key=f"chapter_content_editor_{ch.id}",
         )
         save_cols = st.columns([1, 1])
-        if save_cols[0].button("保存正文", use_container_width=True):
+        if save_cols[0].button("保存正文", use_container_width=True, disabled=is_processing):
+            st.session_state.processing_action = "save"
+            st.rerun()
+
+        # ---- 执行：保存正文 ----
+        if st.session_state.processing_action == "save":
             ch.content = content_editor
             ch.word_count = count_chinese_words(ch.content)
             if ch.status == ChapterStatus.PLANNED:
                 ch.status = ChapterStatus.REVIEW
             save_project(project)
             st.success(f"已保存，{ch.word_count} 字")
-        if save_cols[1].button("审校通过", use_container_width=True):
+            st.session_state.processing_action = None
+            st.rerun()
+
+        if save_cols[1].button("审校通过", use_container_width=True, disabled=is_processing):
+            st.session_state.processing_action = "approve"
+            st.rerun()
+
+        # ---- 执行：审校通过 ----
+        if st.session_state.processing_action == "approve":
             # 先AI分析章节内容，提取剧情记忆、新人物、新地点、新势力、分支剧情
             with st.spinner("正在分析章节内容..."):
                 try:
@@ -1690,6 +1905,7 @@ elif page == "章节创作":
 
             pipeline.approve_chapter(project, ch.id)
             st.success("章节已标记为完成")
+            st.session_state.processing_action = None
             # 保持当前章节，不要跳回第一章
             st.rerun()
 

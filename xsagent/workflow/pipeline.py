@@ -509,6 +509,123 @@ class CreationPipeline:
             **kwargs
         )
 
+    def revise_chapter(
+        self,
+        project: NovelProject,
+        chapter_id: str,
+        revision_notes: str,
+        temperature: float = 0.7,
+        max_tokens: int = 7000,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> Chapter:
+        """
+        修订重写章节：基于已有正文和作者修改意见，让 AI 在原文基础上修订。
+        与 regenerate_chapter 的区别：
+        - regenerate 是从零重新生成
+        - revise 是把原文作为输入，按作者意见修订细节，保留整体结构
+        """
+        if not self.generator:
+            raise RuntimeError("未配置 AI 生成器，请先设置 generator")
+
+        chapter = project.chapters.get(chapter_id)
+        if not chapter:
+            raise ValueError(f"章节不存在: {chapter_id}")
+        if not chapter.content or not chapter.content.strip():
+            raise ValueError("章节正文为空，无法修订。请先生成章节内容。")
+        if not revision_notes or not revision_notes.strip():
+            raise ValueError("请输入修改意见")
+
+        chapter.status = ChapterStatus.WRITING
+        self.storage.save(project)
+
+        # 收集上下文
+        ctx = project.build_generation_context(chapter_id)
+        outline_path = ' > '.join(ctx.outline_path) if ctx.outline_path else ''
+        chapter_summary = chapter.outline_summary or (ctx.current_node.summary if ctx.current_node else '')
+
+        # 收集出场人物信息
+        char_info = ""
+        if chapter.characters_present:
+            char_lines = []
+            for cid in chapter.characters_present:
+                c = project.characters.get(cid)
+                if c:
+                    line = f"- {c.name}（{c.role.value}）: {c.personality}"
+                    if c.motivation:
+                        line += f"，动机: {c.motivation}"
+                    char_lines.append(line)
+            if char_lines:
+                char_info = "\n".join(char_lines)
+
+        # 构建修订提示词
+        prompt = f"""你是一位资深的中文小说编辑，擅长在保留原作风格和整体结构的前提下，根据作者意见对章节进行精准修订。
+
+## 任务
+请根据作者的修改意见，对以下章节正文进行修订重写。
+
+## 修订原则
+1. **保留整体结构**：章节的大框架、主要情节走向、人物出场顺序应基本保持不变
+2. **精准修改**：只针对作者指出的问题进行修改，不要改动作者没有提到的满意部分
+3. **风格一致**：修订后的文字风格应与原文保持一致
+4. **连贯性**：修改后的内容要与前后文自然衔接，不能出现断裂感
+5. **输出完整章节**：请输出修订后的完整章节正文，不要只输出修改的片段
+
+## 章节信息
+- 位置: {outline_path}
+- 标题: {chapter.title}
+- 摘要: {chapter_summary}
+{f'- 出场人物:\n{char_info}' if char_info else ''}
+
+## ⚠️ 作者修改意见（必须严格执行）
+{revision_notes.strip()}
+
+## 原文正文
+{chapter.content}
+
+## 输出要求
+请直接输出修订后的完整章节正文，不要任何额外的说明、注释或标记。"""
+
+        request = create_request(
+            prompt=prompt,
+            system_message="你是一位专业中文小说编辑。请根据作者修改意见，在原文基础上进行精准修订，输出完整的修订后正文。",
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+        # 执行生成
+        if stream_callback:
+            full_text = ""
+            for chunk in self.generator.generate_stream(request):
+                full_text += chunk
+                stream_callback(chunk)
+            result_text = full_text
+        else:
+            result = self.generator.generate(request)
+            if not result.success:
+                chapter.status = ChapterStatus.REVIEW
+                self.storage.save(project)
+                raise RuntimeError(f"修订失败: {result.error_message}")
+            result_text = result.text
+
+        # 更新章节
+        chapter.content = result_text.strip()
+        chapter.word_count = count_chinese_words(chapter.content)
+        chapter.status = ChapterStatus.REVIEW
+        chapter.generation_history.append({
+            "timestamp": datetime.now().isoformat(),
+            "model": self.generator.get_name(),
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "prompt_length": len(prompt),
+            "output_length": len(result_text),
+            "type": "revision",
+        })
+
+        project.updated_at = datetime.now().isoformat()
+        self.storage.save(project)
+
+        return chapter
+
     def generate_dialogue(
         self,
         project: NovelProject,
@@ -652,27 +769,24 @@ class CreationPipeline:
             prompt=prompt,
             system_message="你是一位专业的小说编辑，擅长提炼剧情要点和识别叙事要素。请严格按JSON格式输出。",
             temperature=0.3,
-            max_tokens=2500,
+            max_tokens=8000,
+            extra_body={"enable_thinking": False},
         )
 
         result = self.generator.generate(request)
         if not result.success:
             raise RuntimeError(f"章节分析失败: {result.error_message}")
 
-        # 尝试解析JSON
+        # 容错：如果 content 为空但 reasoning_content 有内容，尝试从中提取
         text = result.text.strip()
-        # 去除可能的markdown代码块标记
-        if text.startswith("```"):
-            text = text.strip("`").strip()
-            if text.lower().startswith("json"):
-                text = text[4:].strip()
+        if not text and result.reasoning_content:
+            text = result.reasoning_content.strip()
 
-        try:
-            analysis = json.loads(text)
-        except json.JSONDecodeError:
-            # 如果解析失败，返回原始文本作为plot_memory
+        analysis = self._extract_json_from_text(text)
+        if not analysis:
+            # 所有解析方式都失败，把原始文本作为 plot_memory 回退
             analysis = {
-                "plot_memory": text[:500],
+                "plot_memory": text[:500] if text else "",
                 "new_characters": [],
                 "new_locations": [],
                 "new_factions": [],
@@ -849,6 +963,56 @@ class CreationPipeline:
         return summary
 
     @staticmethod
+    def _extract_json_from_text(text: str) -> Dict[str, Any]:
+        """
+        从文本中智能提取 JSON 对象，支持多种容错方式：
+        1. 直接解析
+        2. 去除 markdown 代码块后解析
+        3. 用正则提取第一个 {} 块
+        4. 用 _repair_truncated_json 修复截断后解析
+        """
+        import re
+
+        if not text or not text.strip():
+            return {}
+
+        candidates = [text.strip()]
+
+        # 去除 markdown 代码块
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`").strip()
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].strip()
+            candidates.append(cleaned)
+
+        # 尝试直接解析所有候选
+        for candidate in candidates:
+            try:
+                return json.loads(candidate)
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+        # 用正则提取第一个 JSON 对象
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # 尝试修复截断的 JSON
+        for candidate in candidates:
+            repaired = CreationPipeline._repair_truncated_json(candidate)
+            if repaired:
+                try:
+                    return json.loads(repaired)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+        return {}
+
+    @staticmethod
     def _repair_truncated_json(text: str) -> Optional[str]:
         """
         修复被截断的 JSON 文本：
@@ -927,6 +1091,7 @@ class CreationPipeline:
         min_acts_per_volume: int = 5,
         min_chapters_per_act: int = 5,
         extra_guidance: str = "",
+        volume_requirements: Optional[List[str]] = None,
         stream_callback: Optional[Callable[[str], None]] = None,
     ) -> OutlineNode:
         """
@@ -941,53 +1106,28 @@ class CreationPipeline:
         if not self.generator:
             raise RuntimeError("未配置 AI 生成器，请先设置 generator")
 
-        # 收集世界观信息
-        world_info = "未设定世界观"
-        if project.world:
-            w = project.world
-            parts = []
-            if w.name:
-                parts.append(f"世界名称: {w.name}")
-            if w.genre:
-                parts.append(f"题材类型: {w.genre}")
-            if w.era:
-                parts.append(f"时代背景: {w.era}")
-            if w.geography:
-                parts.append(f"地理设定: {w.geography}")
-            if w.history:
-                parts.append(f"历史沿革: {w.history}")
-            if w.power_system:
-                parts.append(f"力量体系: {w.power_system}")
-            if w.society:
-                parts.append(f"社会结构: {w.society}")
-            if w.rules:
-                parts.append(f"核心规则: {'; '.join(w.rules)}")
-            if w.customs:
-                parts.append(f"风俗文化: {'; '.join(w.customs)}")
-            world_info = "\n".join(parts)
+        ctx = self._collect_project_context(project)
+        world_info = ctx['world_info']
+        char_info = ctx['char_info']
+        loc_info = ctx['loc_info']
+        fac_info = ctx['fac_info']
 
-        # 收集人物信息
-        char_info = "暂无人物设定"
-        if project.characters:
-            char_lines = []
-            for c in project.characters.values():
-                line = f"- {c.name}（{c.role.value}）: {c.personality}"
-                if c.motivation:
-                    line += f"，动机: {c.motivation}"
-                char_lines.append(line)
-            char_info = "\n".join(char_lines)
-
-        # 收集地点信息
-        loc_info = ""
-        if project.locations:
-            loc_lines = [f"- {loc.name}: {loc.description}" for loc in project.locations.values()]
-            loc_info = "\n关键地点:\n" + "\n".join(loc_lines)
-
-        # 收集势力信息
-        fac_info = ""
-        if project.factions:
-            fac_lines = [f"- {fac.name}: {fac.description}" for fac in project.factions.values()]
-            fac_info = "\n主要势力:\n" + "\n".join(fac_lines)
+        # 构建阶段性要求文本
+        vol_req_text = ""
+        if volume_requirements:
+            req_lines = []
+            for i, req in enumerate(volume_requirements):
+                if req and req.strip():
+                    req_lines.append(f"  - 第{i+1}卷: {req.strip()}")
+            if req_lines:
+                vol_req_text = (
+                    "\n## 📌 阶段性大纲要求（每卷边界约束，必须严格遵守）\n"
+                    "以下是每卷的阶段性限制，每卷的内容（人物成长、实力进展、剧情推进）"
+                    "**必须严格控制在指定范围内**，不得提前透支后续卷的内容：\n"
+                    + "\n".join(req_lines)
+                    + "\n\n⚠️ 每卷的剧情发展和人物成长必须恰好写到该卷要求的阶段为止，"
+                    "不能超前也不能滞后。这是硬性约束，优先级高于其他内容要求。\n"
+                )
 
         prompt = f"""你是一位资深的小说策划编辑，擅长构建宏大叙事结构。
 请根据以下小说设定，生成一部完整的故事大纲。
@@ -1019,7 +1159,13 @@ class CreationPipeline:
 5. 章 emotional_tone: 每章标注情感基调（如：紧张、悲壮、温馨、压抑等）
 6. 故事必须有完整的起承转合，伏笔要有回收，冲突要有解决
 7. 每卷之间有递进关系，难度和冲突逐步升级
-{f'8. 额外指导: {extra_guidance}' if extra_guidance else ''}
+8. 严格遵守世界观中的设定，不能违背世界观设定
+{vol_req_text}{f"""## ⚠️ 创作者核心指导（高优先级，必须严格遵守）
+以下是创作者对本书的核心创作要求和方向要求，生成大纲时必须将其作为较高优先级的指导原则：
+
+{extra_guidance}
+
+请确保，不得偏离或忽视。""" if extra_guidance else ''}
 
 ## 输出格式
 严格按以下 JSON 格式输出，不要任何额外解释或 markdown 代码块标记：
@@ -1055,7 +1201,7 @@ class CreationPipeline:
             prompt=prompt,
             system_message="你是一位专业的小说大纲策划师。请严格按JSON格式输出完整的四级大纲结构。",
             temperature=0.8,
-            max_tokens=65536,
+            max_tokens=655360,
         )
 
         # 执行生成
@@ -1135,6 +1281,303 @@ class CreationPipeline:
         pipeline_self.set_outline(project, outline)
 
         return project.outline
+
+    def _collect_project_context(self, project: NovelProject) -> dict:
+        """收集项目的世界观、人物、地点、势力信息，供大纲生成/续写共用"""
+        world_info = "未设定世界观"
+        if project.world:
+            w = project.world
+            parts = []
+            if w.name: parts.append(f"世界名称: {w.name}")
+            if w.genre: parts.append(f"题材类型: {w.genre}")
+            if w.era: parts.append(f"时代背景: {w.era}")
+            if w.geography: parts.append(f"地理设定: {w.geography}")
+            if w.history: parts.append(f"历史沿革: {w.history}")
+            if w.power_system: parts.append(f"力量体系: {w.power_system}")
+            if w.society: parts.append(f"社会结构: {w.society}")
+            if w.rules: parts.append(f"核心规则: {'; '.join(w.rules)}")
+            if w.customs: parts.append(f"风俗文化: {'; '.join(w.customs)}")
+            world_info = "\n".join(parts)
+
+        char_info = "暂无人物设定"
+        if project.characters:
+            char_lines = []
+            for c in project.characters.values():
+                line = f"- {c.name}（{c.role.value}）: {c.personality}"
+                if c.motivation: line += f"，动机: {c.motivation}"
+                char_lines.append(line)
+            char_info = "\n".join(char_lines)
+
+        loc_info = ""
+        if project.locations:
+            loc_lines = [f"- {loc.name}: {loc.description}" for loc in project.locations.values()]
+            loc_info = "\n关键地点:\n" + "\n".join(loc_lines)
+
+        fac_info = ""
+        if project.factions:
+            fac_lines = [f"- {fac.name}: {fac.description}" for fac in project.factions.values()]
+            fac_info = "\n主要势力:\n" + "\n".join(fac_lines)
+
+        return {"world_info": world_info, "char_info": char_info, "loc_info": loc_info, "fac_info": fac_info}
+
+    def _build_existing_outline_context(self, project: NovelProject, max_acts: int = 10) -> str:
+        """
+        构建已有大纲的上下文摘要，用于续写。
+        取最后 max_acts 幕，越靠后的幕提供越多细节（权重递增）。
+        """
+        if not project.outline:
+            return ""
+
+        # 收集所有 (卷, 幕) 对
+        all_acts = []  # [(vol_node, act_node), ...]
+        for vol in project.outline.children:
+            if vol.level == 1:
+                for act in vol.children:
+                    if act.level == 2:
+                        all_acts.append((vol, act))
+
+        if not all_acts:
+            return ""
+
+        # 取最后 max_acts 幕
+        recent_acts = all_acts[-max_acts:]
+        total = len(recent_acts)
+
+        lines = []
+        # 先输出总纲摘要
+        lines.append(f"【总纲】{project.outline.summary}")
+        lines.append("")
+
+        # 输出所有卷的摘要
+        seen_vols = set()
+        for vol in project.outline.children:
+            if vol.level == 1:
+                lines.append(f"【{vol.title}】{vol.summary}")
+                seen_vols.add(vol.id)
+        lines.append("")
+
+        # 按权重输出幕详情
+        lines.append("--- 最近的剧情进展（越靠后越重要） ---")
+        for idx, (vol, act) in enumerate(recent_acts):
+            # 权重比例: 前面的幕只输出标题+摘要，后面的幕展开章详情
+            weight = (idx + 1) / total  # 0.1 ~ 1.0
+            act_header = f"\n[{vol.title} / {act.title}] {act.summary}"
+            lines.append(act_header)
+
+            # 权重 >= 0.5 的幕展示章标题列表，权重 >= 0.8 的幕展示章详情
+            chapters = [c for c in act.children if c.level == 3]
+            if weight >= 0.8:
+                # 高权重：展示完整章详情
+                for ch in chapters:
+                    tone = f" [{ch.emotional_tone}]" if ch.emotional_tone else ""
+                    lines.append(f"  - {ch.title}{tone}: {ch.summary}")
+            elif weight >= 0.5:
+                # 中权重：只展示章标题
+                ch_titles = ", ".join(ch.title for ch in chapters)
+                if ch_titles:
+                    lines.append(f"  章节: {ch_titles}")
+            # 低权重：只有幕摘要，不展开章
+
+        return "\n".join(lines)
+
+    def continue_outline(
+        self,
+        project: NovelProject,
+        num_new_volumes: int = 1,
+        min_acts_per_volume: int = 5,
+        min_chapters_per_act: int = 5,
+        extra_guidance: str = "",
+        volume_requirements: Optional[List[str]] = None,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> OutlineNode:
+        """
+        续写大纲：基于已有大纲内容，生成新的卷/幕/章并追加到现有大纲中。
+        将已有大纲的最近 10 幕作为上下文，越靠后的幕权重越高。
+        """
+        if not self.generator:
+            raise RuntimeError("未配置 AI 生成器，请先设置 generator")
+        if not project.outline or not project.outline.children:
+            raise RuntimeError("当前没有大纲，请先使用【全自动生成】创建初始大纲")
+
+        ctx = self._collect_project_context(project)
+        existing_context = self._build_existing_outline_context(project, max_acts=10)
+
+        # 统计当前大纲规模
+        existing_vols = [v for v in project.outline.children if v.level == 1]
+        next_vol_num = len(existing_vols) + 1
+
+        # 构建阶段性要求文本
+        vol_req_text = ""
+        if volume_requirements:
+            req_lines = []
+            for i, req in enumerate(volume_requirements):
+                if req and req.strip():
+                    req_lines.append(f"  - 第{next_vol_num + i}卷: {req.strip()}")
+            if req_lines:
+                vol_req_text = (
+                    "\n## 📌 阶段性大纲要求（每卷边界约束，必须严格遵守）\n"
+                    "以下是续写各卷的阶段性限制，每卷的内容（人物成长、实力进展、剧情推进）"
+                    "**必须严格控制在指定范围内**，不得提前透支后续卷的内容：\n"
+                    + "\n".join(req_lines)
+                    + "\n\n⚠️ 每卷的剧情发展和人物成长必须恰好写到该卷要求的阶段为止，"
+                    "不能超前也不能滞后。这是硬性约束，优先级高于其他内容要求。\n"
+                )
+
+        prompt = f"""你是一位资深的小说策划编辑，擅长构建宏大叙事结构。
+现在需要你**续写**一部小说的大纲。以下是小说的设定和已有的大纲内容。
+
+## 小说信息
+- 标题: {project.title}
+- 简介: {project.description or '暂无'}
+
+## 世界观设定
+{ctx['world_info']}
+{ctx['loc_info']}
+{ctx['fac_info']}
+
+## 人物设定
+{ctx['char_info']}
+
+## 已有大纲内容（请仔细阅读，续写必须与已有内容衔接）
+{existing_context}
+
+## 续写任务
+请从第 {next_vol_num} 卷开始续写，生成 {num_new_volumes} 卷新内容。
+
+## 结构要求
+续写部分必须严格遵守「卷-幕-章」三级结构：
+1. 卷（level=1）: 恰好 {num_new_volumes} 卷，从「第{next_vol_num}卷」开始编号
+2. 幕（level=2）: 每卷至少 {min_acts_per_volume} 幕
+3. 章（level=3）: 每幕至少 {min_chapters_per_act} 章
+
+## 内容要求
+1. 续写内容必须与已有大纲无缝衔接，承接前文的人物发展和剧情走向
+2. 卷 summary: 概括本卷的阶段目标、主要冲突和关键转折（150字以内）
+3. 幕 summary: 描述本幕的叙事功能及具体剧情任务（100字以内）
+4. 章 summary: 具体描述本章事件、参与人物、情感走向（80字以内）
+5. 章 emotional_tone: 标注情感基调
+6. 故事发展要有递进，冲突逐步升级
+7. 注意回收前文已埋设的伏笔，同时可以埋设新的伏笔
+{vol_req_text}{f'''\n## ⚠️ 创作者核心指导（最高优先级，必须严格遵守）
+{extra_guidance}
+
+请确保续写内容充分体现上述创作指导，不得偏离或忽视。''' if extra_guidance else ''}
+
+## 输出格式
+严格按以下 JSON 格式输出续写的卷（注意：只输出新增的卷，不要重复已有内容）：
+{{
+  "new_volumes": [
+    {{
+      "title": "第{next_vol_num}卷：卷名",
+      "level": 1,
+      "summary": "卷摘要",
+      "children": [
+        {{
+          "title": "第X幕：幕名",
+          "level": 2,
+          "summary": "幕摘要",
+          "children": [
+            {{
+              "title": "第X章 章名",
+              "level": 3,
+              "summary": "章节摘要",
+              "emotional_tone": "情感基调"
+            }}
+          ]
+        }}
+      ]
+    }}
+  ]
+}}"""
+
+        request = create_request(
+            prompt=prompt,
+            system_message="你是一位专业的小说大纲策划师。请严格按JSON格式输出续写的大纲结构，只输出新增的卷。",
+            temperature=0.8,
+            max_tokens=65536,
+        )
+
+        # 执行生成
+        if stream_callback:
+            full_text = ""
+            for chunk in self.generator.generate_stream(request):
+                full_text += chunk
+                stream_callback(chunk)
+            result_text = full_text
+        else:
+            result = self.generator.generate(request)
+            if not result.success:
+                raise RuntimeError(f"大纲续写失败: {result.error_message}")
+            result_text = result.text
+
+        # 解析 JSON
+        text = result_text.strip()
+        if text.startswith("```"):
+            text = text.strip("`").strip()
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+        if text.endswith("```"):
+            text = text[:-3].strip()
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            import re
+            match = re.search(r'\{', text)
+            if match:
+                brace_count = 0
+                start = match.start()
+                found = False
+                for i in range(start, len(text)):
+                    if text[i] == '{': brace_count += 1
+                    elif text[i] == '}': brace_count -= 1
+                    if brace_count == 0:
+                        try:
+                            data = json.loads(text[start:i+1])
+                            found = True
+                            break
+                        except json.JSONDecodeError:
+                            continue
+                if not found:
+                    truncated = text[start:]
+                    repaired = self._repair_truncated_json(truncated)
+                    if repaired:
+                        try:
+                            data = json.loads(repaired)
+                        except json.JSONDecodeError:
+                            raise RuntimeError(f"AI 返回的续写 JSON 解析失败（可能因 token 不足被截断）: {e}\n原始文本前500字: {text[:500]}")
+                    else:
+                        raise RuntimeError(f"AI 返回的续写 JSON 解析失败（可能因 token 不足被截断）: {e}\n原始文本前500字: {text[:500]}")
+            else:
+                raise RuntimeError(f"AI 返回的续写 JSON 解析失败: {e}\n原始文本前500字: {text[:500]}")
+
+        # 提取新卷并追加到现有大纲
+        new_volumes_data = data.get("new_volumes", [])
+        if not new_volumes_data:
+            # 兼容：AI 可能直接返回单个卷或卷数组
+            if isinstance(data, list):
+                new_volumes_data = data
+            elif data.get("level") == 1:
+                new_volumes_data = [data]
+            elif data.get("children"):
+                new_volumes_data = data["children"]
+            else:
+                raise RuntimeError("AI 返回的续写内容中未找到新卷数据")
+
+        added_count = 0
+        for vol_data in new_volumes_data:
+            vol_node = OutlineNode.from_dict(vol_data)
+            if vol_node.level != 1:
+                vol_node.level = 1
+            project.outline.children.append(vol_node)
+            added_count += 1
+
+        # 同步新增章节
+        self._sync_chapters_from_outline(project)
+        project.updated_at = datetime.now().isoformat()
+        self.storage.save(project)
+
+        return added_count
 
     def approve_chapter(self, project: NovelProject, chapter_id: str) -> Chapter:
         """审校通过章节"""

@@ -26,9 +26,7 @@ variables:
 ### 基本信息
 - **题材**: {{world_genre}}
 - **时代背景**: {{world_era}}
-- **世界名称**: {{world_name}}
-
-{{world_summary}}
+- **小说名称**: {{world_name}}
 
 ### 地理设定
 {{world_geography}}

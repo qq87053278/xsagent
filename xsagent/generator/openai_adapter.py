@@ -38,16 +38,30 @@ class OpenAIGenerator(BaseGenerator):
 
     def _build_thinking_params(self, extra_params: Dict[str, Any]) -> Dict[str, Any]:
         """构建思考模式参数，通过 extra_body 传递给 API"""
+        params = dict(extra_params)
+        extra_body = dict(params.pop("extra_body", {}) or {})
+
+        # 如果请求中明确禁用思考模式，尊重请求级配置
+        if extra_body.get("enable_thinking") is False:
+            params["extra_body"] = extra_body
+            return params
+
         if not self.thinking:
             return extra_params
-        params = dict(extra_params)
+
         # 思考模式参数需通过 extra_body 传递（OpenAI SDK 不接受未知顶层参数）
-        extra_body = dict(params.pop("extra_body", {}) or {})
         extra_body.setdefault("enable_thinking", True)
         if self.thinking_budget > 0:
             extra_body.setdefault("thinking_budget", self.thinking_budget)
         params["extra_body"] = extra_body
         return params
+
+    def _use_thinking(self, extra_params: Dict[str, Any]) -> bool:
+        """判断本次请求是否实际启用思考模式"""
+        extra_body = extra_params.get("extra_body", {}) or {}
+        if extra_body.get("enable_thinking") is False:
+            return False
+        return self.thinking
 
     @staticmethod
     def _extract_reasoning(choice) -> str:
@@ -80,7 +94,7 @@ class OpenAIGenerator(BaseGenerator):
                 **extra,
             )
             # 思考模式下 DeepSeek 不接受 max_tokens，需改用 max_completion_tokens
-            if self.thinking:
+            if self._use_thinking(extra):
                 call_kwargs["max_completion_tokens"] = resolved_max
             else:
                 call_kwargs["max_tokens"] = resolved_max
@@ -127,7 +141,7 @@ class OpenAIGenerator(BaseGenerator):
                 stream=True,
                 **extra,
             )
-            if self.thinking:
+            if self._use_thinking(extra):
                 call_kwargs["max_completion_tokens"] = resolved_max
             else:
                 call_kwargs["max_tokens"] = resolved_max
