@@ -4,7 +4,6 @@ version: "1.0"
 description: 逻辑一致性与常识约束 — 确保章节内容因果合理、时空连贯、行为可信、符合常识
 skill_type: logic_consistency
 variables:
-  - world_summary
   - previous_chapter_plot_memory
   - relevant_characters
 ---

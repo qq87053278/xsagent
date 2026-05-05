@@ -371,17 +371,35 @@ class CreationPipeline:
         self.storage.save(project)
         return node
 
+    def _collect_chapter_ids_from_subtree(self, node: OutlineNode) -> List[str]:
+        """收集节点及其所有子孙节点关联的章节ID"""
+        result = []
+        if node.chapter_id:
+            result.append(node.chapter_id)
+        for child in node.children:
+            result.extend(self._collect_chapter_ids_from_subtree(child))
+        return result
+
     def remove_outline_node(
         self,
         project: NovelProject,
         node_id: str,
         remove_linked_chapter: bool = False,
     ) -> bool:
-        """删除大纲节点。若节点关联了章节，可选择是否同时删除章节"""
+        """删除大纲节点。若节点关联了章节，可选择是否同时删除章节（含子孙节点关联的章节）"""
         if not project.outline:
             return False
         if project.outline.id == node_id:
-            # 删除根节点 = 清空整个大纲
+            # 删除根节点 = 清空整个大纲，同时级联处理所有子树关联的章节
+            chapter_ids = self._collect_chapter_ids_from_subtree(project.outline)
+            if remove_linked_chapter:
+                for ch_id in chapter_ids:
+                    if ch_id in project.chapters:
+                        del project.chapters[ch_id]
+            else:
+                for ch_id in chapter_ids:
+                    if ch_id in project.chapters:
+                        project.chapters[ch_id].outline_summary = ""
             project.outline = None
             project.updated_at = datetime.now().isoformat()
             self.storage.save(project)
@@ -397,13 +415,16 @@ class CreationPipeline:
         if not target:
             return False
         parent.children.remove(target)
-        # 处理关联章节
-        if target.chapter_id and target.chapter_id in project.chapters:
-            if remove_linked_chapter:
-                del project.chapters[target.chapter_id]
-            else:
-                # 仅解除关联
-                project.chapters[target.chapter_id].outline_summary = ""
+        # 级联处理被删除子树中所有关联的章节
+        chapter_ids = self._collect_chapter_ids_from_subtree(target)
+        if remove_linked_chapter:
+            for ch_id in chapter_ids:
+                if ch_id in project.chapters:
+                    del project.chapters[ch_id]
+        else:
+            for ch_id in chapter_ids:
+                if ch_id in project.chapters:
+                    project.chapters[ch_id].outline_summary = ""
         project.updated_at = datetime.now().isoformat()
         self.storage.save(project)
         return True
@@ -1084,7 +1105,7 @@ class CreationPipeline:
 
         return s if s else None
 
-    def auto_generate_outline(
+    def get_auto_generate_outline_prompt(
         self,
         project: NovelProject,
         num_volumes: int = 3,
@@ -1092,25 +1113,16 @@ class CreationPipeline:
         min_chapters_per_act: int = 5,
         extra_guidance: str = "",
         volume_requirements: Optional[List[str]] = None,
-        stream_callback: Optional[Callable[[str], None]] = None,
-    ) -> OutlineNode:
+    ) -> str:
         """
-        全自动生成 总纲-卷-幕-章 四级大纲。
-        基于项目的世界观设定、人物设定、描述等信息，
-        让 AI 一次性生成完整的故事大纲结构。
-
-        约束：
-        - 每卷至少 min_acts_per_volume 幕
-        - 每幕至少 min_chapters_per_act 章
+        获取全自动生成大纲时使用的完整提示词（用于预览）
         """
-        if not self.generator:
-            raise RuntimeError("未配置 AI 生成器，请先设置 generator")
-
         ctx = self._collect_project_context(project)
         world_info = ctx['world_info']
         char_info = ctx['char_info']
         loc_info = ctx['loc_info']
         fac_info = ctx['fac_info']
+        item_info = ctx['item_info']
 
         # 构建阶段性要求文本
         vol_req_text = ""
@@ -1130,7 +1142,7 @@ class CreationPipeline:
                 )
 
         prompt = f"""你是一位资深的小说策划编辑，擅长构建宏大叙事结构。
-请根据以下小说设定，生成一部完整的故事大纲。
+请根据以下小说设定，生成故事大纲卷。
 
 ## 小说信息
 - 标题: {project.title}
@@ -1143,6 +1155,9 @@ class CreationPipeline:
 
 ## 人物设定
 {char_info}
+
+## 物品设定
+{item_info}
 
 ## 结构要求
 大纲必须严格遵守「总纲-卷-幕-章」四级结构：
@@ -1196,6 +1211,38 @@ class CreationPipeline:
     }}
   ]
 }}"""
+        return prompt
+
+    def auto_generate_outline(
+        self,
+        project: NovelProject,
+        num_volumes: int = 3,
+        min_acts_per_volume: int = 5,
+        min_chapters_per_act: int = 5,
+        extra_guidance: str = "",
+        volume_requirements: Optional[List[str]] = None,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> OutlineNode:
+        """
+        全自动生成 总纲-卷-幕-章 四级大纲。
+        基于项目的世界观设定、人物设定、描述等信息，
+        让 AI 一次性生成完整的故事大纲结构。
+
+        约束：
+        - 每卷至少 min_acts_per_volume 幕
+        - 每幕至少 min_chapters_per_act 章
+        """
+        if not self.generator:
+            raise RuntimeError("未配置 AI 生成器，请先设置 generator")
+
+        prompt = self.get_auto_generate_outline_prompt(
+            project=project,
+            num_volumes=num_volumes,
+            min_acts_per_volume=min_acts_per_volume,
+            min_chapters_per_act=min_chapters_per_act,
+            extra_guidance=extra_guidance,
+            volume_requirements=volume_requirements,
+        )
 
         request = create_request(
             prompt=prompt,
@@ -1318,7 +1365,43 @@ class CreationPipeline:
             fac_lines = [f"- {fac.name}: {fac.description}" for fac in project.factions.values()]
             fac_info = "\n主要势力:\n" + "\n".join(fac_lines)
 
-        return {"world_info": world_info, "char_info": char_info, "loc_info": loc_info, "fac_info": fac_info}
+        item_info = ""
+        if project.items:
+            item_lines = []
+            type_labels = {
+                "artifact": "法宝", "weapon": "武器", "armor": "护具",
+                "consumable": "消耗品", "material": "材料",
+                "treasure": "宝物", "other": "其他"
+            }
+            grade_labels = {
+                "trash": "垃圾", "common": "普通", "uncommon": "优秀",
+                "rare": "稀有", "epic": "史诗", "legendary": "传说", "divine": "神器"
+            }
+            for item in project.items.values():
+                owner_name = ""
+                if item.owner_character_id and item.owner_character_id in project.characters:
+                    owner_name = project.characters[item.owner_character_id].name
+                loc_name = ""
+                if item.location_id and item.location_id in project.locations:
+                    loc_name = project.locations[item.location_id].name
+
+                type_label = type_labels.get(item.item_type, item.item_type)
+                grade_label = grade_labels.get(item.grade, item.grade)
+                line = f"- {item.name} [{grade_label}/{type_label}]"
+                if item.effects:
+                    line += f" — 功效: {item.effects}"
+                if item.origin:
+                    line += f" — 来源: {item.origin}"
+                if owner_name:
+                    line += f" — 持有者: {owner_name}"
+                if loc_name:
+                    line += f" — 所在地点: {loc_name}"
+                if item.description:
+                    line += f"\n  描述: {item.description}"
+                item_lines.append(line)
+            item_info = "\n重要物品:\n" + "\n".join(item_lines)
+
+        return {"world_info": world_info, "char_info": char_info, "loc_info": loc_info, "fac_info": fac_info, "item_info": item_info}
 
     def _build_existing_outline_context(self, project: NovelProject, max_acts: int = 10) -> str:
         """
@@ -1437,6 +1520,9 @@ class CreationPipeline:
 
 ## 人物设定
 {ctx['char_info']}
+
+## 物品设定
+{ctx['item_info']}
 
 ## 已有大纲内容（请仔细阅读，续写必须与已有内容衔接）
 {existing_context}

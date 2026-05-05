@@ -16,7 +16,6 @@ variables:
   - world_factions
   - world_customs
   - world_notes
-  - world_summary
 ---
 
 ## 世界观约束

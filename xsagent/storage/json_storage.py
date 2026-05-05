@@ -46,7 +46,6 @@ class JSONStorage:
         # 同时保存独立的设定文件便于人工查阅
         self._save_world_building_sheet(project)
         self._save_characters_sheet(project)
-        self._save_outline_sheet(project)
 
         return str(file_path)
 

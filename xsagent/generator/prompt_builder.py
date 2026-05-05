@@ -68,7 +68,6 @@ class PromptBuilder:
             locations_text = self._format_locations(project.locations.values()) if project.locations else ""
             factions_text = self._format_factions(project.factions.values(), project.locations) if project.factions else ""
             world_ctx = {
-                "world_summary": ctx.world_summary,
                 "world_name": w.name if w else "",
                 "world_genre": w.genre if w else "",
                 "world_era": w.era if w else "",
@@ -83,8 +82,6 @@ class PromptBuilder:
                 "world_notes": w.notes if w else "",
             }
             sections.append(world_skill.render(world_ctx))
-        else:
-            sections.append(self._default_world_section(ctx.world_summary, project))
 
         # === 3. 大纲约束 (Skill: plot_generation) ===
         plot_skill = self._get_skill(bindings, "plot_generation")
@@ -148,7 +145,6 @@ class PromptBuilder:
         logic_skill = self._get_skill(bindings, "logic_consistency")
         if logic_skill:
             logic_ctx = {
-                "world_summary": ctx.world_summary,
                 "previous_chapter_plot_memory": ctx.previous_chapter_plot_memory,
                 "relevant_characters": self._format_characters(ctx.relevant_characters) if ctx.relevant_characters else "无",
             }
@@ -410,10 +406,8 @@ class PromptBuilder:
             lines.append(f"- {status_label} {fac.name}{loc_info}: {fac.description}")
         return "\n".join(lines)
 
-    def _default_world_section(self, world_summary: str, project) -> str:
+    def _default_world_section(self,  project) -> str:
         parts = [
-            "## 世界观设定",
-            f"{world_summary}",
         ]
         if project.locations:
             parts.append("\n### 关键地点")

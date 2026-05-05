@@ -740,32 +740,20 @@ class NovelProject:
             ctx.mimicry_mode = True
             ctx.reference_author = style.reference_author
 
-        # 分支剧情指令 — 本章需推进/呼应的活跃分支
+        # 分支剧情指令 — 仅包含用户明确勾选「本章推进」的活跃分支
         if self.branch_plots:
-            active_branches = [
+            progressed_branches = [
                 b for b in self.branch_plots.values()
                 if b.status in (BranchStatus.OPEN, BranchStatus.IN_PROGRESS)
+                and chapter_id in b.progress_chapter_ids
             ]
-            if active_branches:
-                progressed = []
-                referenced = []
-                for branch in active_branches:
-                    if chapter_id in branch.progress_chapter_ids:
-                        progressed.append(
-                            f"- [{branch.importance}] {branch.title}: {branch.description}"
-                        )
-                    else:
-                        referenced.append(
-                            f"- [{branch.importance}] {branch.title}: {branch.description}"
-                        )
-                if progressed:
-                    ctx.branch_directives.append("【本章需推进的分支剧情】")
-                    ctx.branch_directives.extend(progressed)
-                    ctx.branch_directives.append("推进要求：在本章中让该分支有实质性进展，可以是触发新事件、揭示线索、改变人物关系等，避免一笔带过。")
-                if referenced:
-                    ctx.branch_directives.append("【本章需呼应的活跃分支】")
-                    ctx.branch_directives.extend(referenced)
-                    ctx.branch_directives.append("呼应要求：在合适的地方提及或暗示这些分支的存在，保持读者记忆，但不要喧宾夺主。")
+            if progressed_branches:
+                ctx.branch_directives.append("【本章需推进的分支剧情】")
+                for branch in progressed_branches:
+                    ctx.branch_directives.append(
+                        f"- [{branch.importance}] {branch.title}: {branch.description}"
+                    )
+                ctx.branch_directives.append("推进要求：在本章中让该分支有实质性进展，可以是触发新事件、揭示线索、改变人物关系等，避免一笔带过。")
 
         return ctx
 

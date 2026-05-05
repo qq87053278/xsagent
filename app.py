@@ -992,7 +992,7 @@ elif page == "故事大纲":
             # 删除节点
             if selected_node_id != project.outline.id:
                 if st.button("删除选中节点", type="secondary"):
-                    pipeline.remove_outline_node(project, selected_node_id)
+                    pipeline.remove_outline_node(project, selected_node_id, remove_linked_chapter=True)
                     st.success("节点已删除")
                     st.rerun()
             else:
@@ -1070,9 +1070,40 @@ elif page == "故事大纲":
                 if project.outline:
                     st.warning("⚠️ 当前已有大纲，全自动生成将覆盖现有大纲。已有的章节关联将被重建。")
 
-                gen_submitted = st.form_submit_button("开始全自动生成", type="primary", use_container_width=True)
+                col_preview, col_gen = st.columns([1, 2])
+                with col_preview:
+                    preview_submitted = st.form_submit_button("预览提示词", use_container_width=True)
+                with col_gen:
+                    gen_submitted = st.form_submit_button("开始全自动生成", type="primary", use_container_width=True)
+
+            if preview_submitted:
+                st.session_state.auto_gen_preview = {
+                    "num_volumes": int(num_volumes),
+                    "min_acts_per_volume": int(min_acts),
+                    "min_chapters_per_act": int(min_chapters),
+                    "extra_guidance": extra_guidance,
+                    "volume_requirements": vol_requirements if vol_requirements else None,
+                }
+                st.rerun()
+
+            # 展示提示词预览
+            if "auto_gen_preview" in st.session_state:
+                st.divider()
+                st.subheader("生成提示词预览")
+                with st.spinner("正在构建提示词..."):
+                    preview_prompt = pipeline.get_auto_generate_outline_prompt(
+                        project,
+                        **st.session_state.auto_gen_preview,
+                    )
+                st.code(preview_prompt, language="markdown")
+                if st.button("关闭预览", key="close_preview"):
+                    del st.session_state.auto_gen_preview
+                    st.rerun()
 
             if gen_submitted:
+                # 清除可能存在的预览
+                if "auto_gen_preview" in st.session_state:
+                    del st.session_state.auto_gen_preview
                 st.subheader("生成进度")
                 timer_placeholder = st.empty()
                 status_placeholder = st.empty()
@@ -1500,6 +1531,9 @@ elif page == "章节创作":
 
     # 用户切换章节时更新 session_state 并清除生成缓存
     if selected_chapter.id != st.session_state.selected_chapter_id:
+        # 清除旧章节的编辑器 widget 状态
+        old_editor_key = f"chapter_content_editor_{st.session_state.selected_chapter_id}"
+        st.session_state.pop(old_editor_key, None)
         st.session_state.selected_chapter_id = selected_chapter.id
         st.session_state.generation_text = ""
         st.rerun()
@@ -1591,6 +1625,17 @@ elif page == "章节创作":
                     _plot_points_default += _line + "\n"
             _plot_points_default = _plot_points_default.strip()
 
+        # 如果从 notes 没解析到，尝试从大纲节点读取（JSON 导入的大纲数据）
+        if not _emotional_tone_default or not _plot_points_default:
+            if project.outline:
+                for node in project.outline.flatten_chapters():
+                    if node.chapter_id == ch.id or node.title == ch.title:
+                        if not _emotional_tone_default:
+                            _emotional_tone_default = node.emotional_tone or ""
+                        if not _plot_points_default and node.plot_points:
+                            _plot_points_default = "\n".join(node.plot_points)
+                        break
+
         with st.form("chapter_plan"):
             summary = st.text_area("本章摘要", value=ch.outline_summary, height=80)
             plot_points = st.text_area("情节点（每行一个）", value=_plot_points_default, height=100)
@@ -1606,6 +1651,8 @@ elif page == "章节创作":
                         for node in project.outline.flatten_chapters():
                             if node.chapter_id == ch.id or node.title == target_ch.title:
                                 node.summary = summary
+                                node.emotional_tone = emotional_tone
+                                node.plot_points = [p.strip() for p in plot_points.splitlines() if p.strip()]
                                 break
                     save_project(project)
                     st.success("已保存")
@@ -1795,7 +1842,7 @@ elif page == "章节创作":
                     except Exception as e:
                         st.error(f"生成失败: {e}")
                     finally:
-                        st.session_state[f"chapter_content_editor_{ch.id}"] = ch.content or st.session_state.generation_text or ""
+                        st.session_state[f"_content_sync_{ch.id}"] = True
                         st.session_state.processing_action = None
                         st.rerun()
 
@@ -1843,7 +1890,7 @@ elif page == "章节创作":
                     except Exception as e:
                         st.error(f"修订失败: {e}")
                     finally:
-                        st.session_state[f"chapter_content_editor_{ch.id}"] = ch.content or st.session_state.generation_text or ""
+                        st.session_state[f"_content_sync_{ch.id}"] = True
                         st.session_state.processing_action = None
                         st.rerun()
         else:
@@ -1851,28 +1898,43 @@ elif page == "章节创作":
 
         st.divider()
         st.subheader("✏️ 内容编辑")
-        content_editor = st.text_area(
-            "章节正文",
-            value=ch.content or st.session_state.generation_text,
-            height=400,
-            disabled=is_processing,
-            key=f"chapter_content_editor_{ch.id}",
-        )
+        # 编辑器状态管理：使用 widget key + 条件 value 避免
+        # Streamlit "default value + session_state" 冲突警告
+        editor_key = f"chapter_content_editor_{ch.id}"
+        # 生成/修订完成后，清除旧 widget 状态，让 value 参数重新生效
+        if st.session_state.pop(f"_content_sync_{ch.id}", False):
+            st.session_state.pop(editor_key, None)
+        # key 不存在于 session_state 时需要通过 value 设置初始内容
+        # key 已存在时 widget 自动从 session_state 读取，无需设 value
+        if editor_key not in st.session_state:
+            content_editor = st.text_area(
+                "章节正文",
+                value=ch.content or st.session_state.generation_text or "",
+                key=editor_key,
+                height=400,
+                disabled=is_processing,
+            )
+        else:
+            content_editor = st.text_area(
+                "章节正文",
+                key=editor_key,
+                height=400,
+                disabled=is_processing,
+            )
         save_cols = st.columns([1, 1])
         if save_cols[0].button("保存正文", use_container_width=True, disabled=is_processing):
-            st.session_state.processing_action = "save"
-            st.rerun()
-
-        # ---- 执行：保存正文 ----
-        if st.session_state.processing_action == "save":
-            ch.content = content_editor
-            ch.word_count = count_chinese_words(ch.content)
-            if ch.status == ChapterStatus.PLANNED:
-                ch.status = ChapterStatus.REVIEW
-            save_project(project)
-            st.success(f"已保存，{ch.word_count} 字")
-            st.session_state.processing_action = None
-            st.rerun()
+            # 直接通过 project.chapters 修改，避免 st.selectbox 返回对象与原始对象引用不一致
+            target_ch = project.chapters.get(ch.id)
+            if target_ch:
+                target_ch.content = content_editor
+                target_ch.word_count = count_chinese_words(target_ch.content)
+                if target_ch.status == ChapterStatus.PLANNED:
+                    target_ch.status = ChapterStatus.REVIEW
+                save_project(project)
+                st.success(f"已保存，{target_ch.word_count} 字")
+                st.rerun()
+            else:
+                st.error("章节对象异常，请刷新页面重试")
 
         if save_cols[1].button("审校通过", use_container_width=True, disabled=is_processing):
             st.session_state.processing_action = "approve"
