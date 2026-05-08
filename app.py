@@ -1842,7 +1842,11 @@ elif page == "章节创作":
                     except Exception as e:
                         st.error(f"生成失败: {e}")
                     finally:
-                        st.session_state[f"_content_sync_{ch.id}"] = True
+                        editor_key = f"chapter_content_editor_{ch.id}"
+                        fresh = project.chapters.get(ch.id)
+                        st.session_state[editor_key] = (
+                            (fresh.content if fresh else "") or st.session_state.generation_text or ""
+                        )
                         st.session_state.processing_action = None
                         st.rerun()
 
@@ -1890,7 +1894,11 @@ elif page == "章节创作":
                     except Exception as e:
                         st.error(f"修订失败: {e}")
                     finally:
-                        st.session_state[f"_content_sync_{ch.id}"] = True
+                        editor_key = f"chapter_content_editor_{ch.id}"
+                        fresh = project.chapters.get(ch.id)
+                        st.session_state[editor_key] = (
+                            (fresh.content if fresh else "") or st.session_state.generation_text or ""
+                        )
                         st.session_state.processing_action = None
                         st.rerun()
         else:
@@ -1898,12 +1906,7 @@ elif page == "章节创作":
 
         st.divider()
         st.subheader("✏️ 内容编辑")
-        # 编辑器状态管理：使用 widget key + 条件 value 避免
-        # Streamlit "default value + session_state" 冲突警告
         editor_key = f"chapter_content_editor_{ch.id}"
-        # 生成/修订完成后，清除旧 widget 状态，让 value 参数重新生效
-        if st.session_state.pop(f"_content_sync_{ch.id}", False):
-            st.session_state.pop(editor_key, None)
         # key 不存在于 session_state 时需要通过 value 设置初始内容
         # key 已存在时 widget 自动从 session_state 读取，无需设 value
         if editor_key not in st.session_state:
